@@ -7,8 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from tts_engine import generate_tts  # noqa: E402
-from voices import VOICES, greeting_for  # noqa: E402
+from app.services.synthesis import generate_tts  # noqa: E402
+from app.services.voice_catalog import VOICES, greeting_for  # noqa: E402
 
 
 def main() -> int:
