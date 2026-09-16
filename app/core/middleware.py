@@ -68,45 +68,70 @@ class HMACAuthMiddleware:
     """Verify HMAC-signed requests before they reach the routes.
 
     `/health/*` stays unauthenticated so liveness/readiness probes need no signature. The request
-    body is buffered once, verified, and then replayed to the downstream application.
+    body is buffered once, capped at `REQUEST_MAX_BODY_BYTES`, verified, and then replayed to the
+    downstream application.
     """
 
     def __init__(self, app: ASGIApp, settings: Settings) -> None:
         self._app = app
         self._verifier = SignatureVerifier(settings)
+        self._max_body_bytes = settings.request_max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path", "").startswith("/health"):
             await self._app(scope, receive, send)
             return
 
+        headers = Headers(scope=scope)
+        declared_length = headers.get("content-length")
+        if (
+            declared_length
+            and declared_length.isdigit()
+            and int(declared_length) > self._max_body_bytes
+        ):
+            await self._error(
+                scope, receive, send, 413, "payload_too_large", "request body too large"
+            )
+            return
+
         body = await self._read_body(receive)
+        if body is None:
+            await self._error(
+                scope, receive, send, 413, "payload_too_large", "request body too large"
+            )
+            return
 
         try:
             self._verifier.verify(
                 method=scope.get("method", ""),
                 path_and_query=self._path_and_query(scope),
-                headers=Headers(scope=scope),
+                headers=headers,
                 body=body,
             )
         except SignatureError as exc:
-            await self._unauthorized(scope, receive, send, str(exc))
+            await self._error(scope, receive, send, 401, "unauthorized", str(exc))
             return
 
         await self._app(scope, self._replay(body, receive), send)
 
-    @staticmethod
-    async def _read_body(receive: Receive) -> bytes:
-        body = b""
+    async def _read_body(self, receive: Receive) -> bytes | None:
+        """Buffer the request body, returning None as soon as it exceeds the configured cap.
+
+        The cap is enforced while reading (not after) so a chunked request without a
+        `Content-Length` header cannot exhaust memory.
+        """
+        body = bytearray()
         while True:
             message = await receive()
             if message["type"] == "http.request":
-                body += message.get("body", b"")
+                body.extend(message.get("body", b""))
+                if len(body) > self._max_body_bytes:
+                    return None
                 if not message.get("more_body", False):
                     break
             elif message["type"] == "http.disconnect":
                 break
-        return body
+        return bytes(body)
 
     @staticmethod
     def _path_and_query(scope: Scope) -> str:
@@ -128,12 +153,19 @@ class HMACAuthMiddleware:
         return replay_receive
 
     @staticmethod
-    async def _unauthorized(scope: Scope, receive: Receive, send: Send, reason: str) -> None:
+    async def _error(
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        status_code: int,
+        error: str,
+        reason: str,
+    ) -> None:
         state = scope.get("state") or {}
         response = JSONResponse(
-            status_code=401,
+            status_code=status_code,
             content={
-                "error": "unauthorized",
+                "error": error,
                 "reason": reason,
                 "request_id": state.get("request_id"),
             },

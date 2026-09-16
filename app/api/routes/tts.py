@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from app.core.config import get_settings
-from app.schemas.tts import TTSRequest
+from app.schemas.tts import TTSRequest, TTSValidationError, validate_tts_request
 from app.services.engine_router import engine_for
 from app.services.synthesis import generate_tts
 
@@ -20,9 +20,10 @@ _semaphore = asyncio.Semaphore(get_settings().tts_concurrency)
 
 @router.post("/v1/tts", response_model=None)
 async def tts(request: Request, req: TTSRequest):
-    fmt = req.format.lower().lstrip(".")
-    if fmt not in ("mp3", "wav"):
-        raise HTTPException(status_code=400, detail="format must be 'mp3' or 'wav'")
+    try:
+        fmt = validate_tts_request(req)
+    except TTSValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     request.state.engine = engine_for(req.language)
     request.state.language = req.language

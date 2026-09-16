@@ -6,7 +6,6 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import health, tts, voices
 from app.core.config import get_settings
@@ -46,13 +45,6 @@ app = FastAPI(
 )
 
 register_exception_handlers(app)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.cors_allow_origins.split(",")],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 app.add_middleware(HMACAuthMiddleware, settings=settings)
 app.add_middleware(RequestContextMiddleware, settings=settings)
 

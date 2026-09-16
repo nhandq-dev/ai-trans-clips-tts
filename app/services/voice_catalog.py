@@ -421,5 +421,18 @@ def voices_for_language(language: str) -> list[dict]:
     return [voice for voice in VOICES if voice["language"] == language]
 
 
+LANGUAGE_CODES = frozenset(entry["code"] for entry in LANGUAGES)
+
+
+def is_supported_language(language: str) -> bool:
+    """Whether `language` is one of the languages exposed by the catalog."""
+    return language in LANGUAGE_CODES
+
+
+def is_valid_voice(voice: str, language: str) -> bool:
+    """Whether `voice` belongs to `language` for its engine."""
+    return any(v["id"] == voice and v["language"] == language for v in VOICES)
+
+
 def catalog() -> dict:
     return {"languages": LANGUAGES, "voices": VOICES}
