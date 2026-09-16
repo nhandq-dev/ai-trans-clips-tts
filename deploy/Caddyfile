@@ -1,0 +1,27 @@
+# Caddy terminates TLS for tts-api.aitransclips.com and proxies to the worker.
+#
+# The worker is published only on loopback (127.0.0.1:8004), so Caddy (a host systemd
+# service) reaches it without exposing the container port publicly.
+#
+# Caddy issues and renews the certificate automatically and redirects HTTP -> HTTPS by
+# default for this hostname; no explicit redirect block is required.
+
+tts-api.aitransclips.com {
+	encode zstd gzip
+
+	request_body {
+		max_size 2MB
+	}
+
+	reverse_proxy 127.0.0.1:8004 {
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 90s
+		}
+	}
+
+	log {
+		output file /var/log/caddy/tts-api.access.log
+		format json
+	}
+}
