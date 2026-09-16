@@ -1,28 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Provision and harden a fresh Ubuntu 22.04.5 LTS host for the tts-worker stack.
+# Provision an Ubuntu 22.04.5 LTS host for the tts-worker stack.
 #
-# Run as root on the VPS (see DEPLOYMENT.md section 2):
-#   sudo ADMIN_USER=deploy ./provision.sh
+# Run as root on the VPS from a repo checkout:
+#   sudo bash deploy/scripts/provision.sh
 #
 # Covers:
 #   - base packages + docker-ce, docker-compose-plugin, caddy, ufw, fail2ban,
 #     unattended-upgrades, curl, jq, htop
 #   - time sync (systemd-timesyncd, falling back to chrony)
-#   - non-root admin user with sudo + docker access and root's authorized_keys
-#   - SSH hardening (key-only, no root login, no password auth)
 #   - ufw allowing only 22/80/443
 #   - Docker log rotation
-#   - /opt/tts-worker on-disk layout, 2 GB swap, and a root-owned 640 .env
+#   - /opt/tts-worker layout, 2 GB swap, root-owned 600 .env, Caddyfile install
+#   - optional: install a CI deploy public key into root's authorized_keys
+#
+# Root SSH login and password authentication are intentionally left untouched so
+# the operator keeps password access. CI deploys authenticate with a dedicated
+# SSH key (see CI_DEPLOY_PUBKEY / CI_DEPLOY_PUBKEY_FILE).
 #
 # The cloud provider firewall must mirror ufw (22/80/443) and cannot be changed here.
 
-ADMIN_USER="${ADMIN_USER:-deploy}"
 SSH_PORT="${SSH_PORT:-22}"
 APP_DIR="${APP_DIR:-/opt/tts-worker}"
 SWAP_SIZE="${SWAP_SIZE:-2G}"
 PUBLIC_DOMAIN="${PUBLIC_DOMAIN:-tts-api.aitransclips.com}"
+CI_DEPLOY_PUBKEY="${CI_DEPLOY_PUBKEY:-}"
+CI_DEPLOY_PUBKEY_FILE="${CI_DEPLOY_PUBKEY_FILE:-}"
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -69,41 +73,6 @@ if ! systemctl is-active --quiet systemd-timesyncd; then
 fi
 timedatectl status || true
 
-log "Creating admin user '${ADMIN_USER}'"
-if ! id -u "${ADMIN_USER}" >/dev/null 2>&1; then
-	useradd --create-home --shell /bin/bash "${ADMIN_USER}"
-fi
-usermod -aG sudo,docker "${ADMIN_USER}"
-if [[ -f /root/.ssh/authorized_keys ]]; then
-	install -d -m 700 -o "${ADMIN_USER}" -g "${ADMIN_USER}" "/home/${ADMIN_USER}/.ssh"
-	install -m 600 -o "${ADMIN_USER}" -g "${ADMIN_USER}" \
-		/root/.ssh/authorized_keys "/home/${ADMIN_USER}/.ssh/authorized_keys"
-fi
-
-log "Granting ${ADMIN_USER} passwordless sudo"
-# The admin user is key-only (no password), so sudo must not prompt for one.
-echo "${ADMIN_USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-${ADMIN_USER}.tmp"
-visudo -cf "/etc/sudoers.d/90-${ADMIN_USER}.tmp"
-chmod 440 "/etc/sudoers.d/90-${ADMIN_USER}.tmp"
-mv "/etc/sudoers.d/90-${ADMIN_USER}.tmp" "/etc/sudoers.d/90-${ADMIN_USER}"
-
-log "Hardening SSH"
-# Refuse to disable password auth unless the admin user can already log in with a key.
-if [[ ! -s "/home/${ADMIN_USER}/.ssh/authorized_keys" ]]; then
-	echo "No SSH key found for ${ADMIN_USER}. Install one (or /root/.ssh/authorized_keys) and re-run." >&2
-	exit 1
-fi
-install -d -m 755 /etc/ssh/sshd_config.d
-cat > /etc/ssh/sshd_config.d/99-tts-worker-hardening.conf <<EOF
-Port ${SSH_PORT}
-PermitRootLogin no
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-PubkeyAuthentication yes
-EOF
-sshd -t
-systemctl reload ssh 2>/dev/null || systemctl reload sshd
-
 log "Configuring ufw (22/80/443 only)"
 ufw default deny incoming
 ufw default allow outgoing
@@ -140,15 +109,15 @@ if [[ -f "${DEPLOY_SRC}/docker-compose.yml" && "${DEPLOY_SRC}" != "${APP_DIR}" ]
 	install -m 755 "${DEPLOY_SRC}"/scripts/*.sh "${APP_DIR}/scripts/"
 fi
 
-chown -R "${ADMIN_USER}:${ADMIN_USER}" "${APP_DIR}"
+chown -R root:root "${APP_DIR}"
 
 if [[ ! -f "${APP_DIR}/.env" && -f "${APP_DIR}/.env.example" ]]; then
-	install -m 640 -o root -g "${ADMIN_USER}" "${APP_DIR}/.env.example" "${APP_DIR}/.env"
+	install -m 600 "${APP_DIR}/.env.example" "${APP_DIR}/.env"
 	echo "Created ${APP_DIR}/.env from .env.example — fill in real secrets before deploying."
 fi
 if [[ -f "${APP_DIR}/.env" ]]; then
-	chown root:"${ADMIN_USER}" "${APP_DIR}/.env"
-	chmod 640 "${APP_DIR}/.env"
+	chown root:root "${APP_DIR}/.env"
+	chmod 600 "${APP_DIR}/.env"
 fi
 
 log "Installing Caddyfile and enabling Caddy"
@@ -185,6 +154,19 @@ if ! swapon --show | grep -q .; then
 	grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
+if [[ -z "${CI_DEPLOY_PUBKEY}" && -n "${CI_DEPLOY_PUBKEY_FILE}" && -f "${CI_DEPLOY_PUBKEY_FILE}" ]]; then
+	CI_DEPLOY_PUBKEY="$(cat "${CI_DEPLOY_PUBKEY_FILE}")"
+fi
+if [[ -n "${CI_DEPLOY_PUBKEY}" ]]; then
+	log "Installing CI deploy public key into root's authorized_keys"
+	install -d -m 700 /root/.ssh
+	touch /root/.ssh/authorized_keys
+	if ! grep -qF "${CI_DEPLOY_PUBKEY}" /root/.ssh/authorized_keys; then
+		printf '%s\n' "${CI_DEPLOY_PUBKEY}" >> /root/.ssh/authorized_keys
+	fi
+	chmod 600 /root/.ssh/authorized_keys
+fi
+
 log "Provisioning complete"
 cat <<EOF
 
@@ -192,5 +174,5 @@ Next steps:
   1. Confirm the provider firewall allows 22/80/443 and nothing else.
   2. Fill in ${APP_DIR}/.env with real HMAC keys and set IMAGE_TAG.
   3. Point the PA Vietnam DNS A record for ${PUBLIC_DOMAIN} at this host (T10).
-  4. Log in as ${ADMIN_USER} (key-only) and verify: bash ${APP_DIR}/scripts/healthcheck.sh
+  4. Verify: bash ${APP_DIR}/scripts/healthcheck.sh
 EOF

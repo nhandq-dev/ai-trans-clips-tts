@@ -18,6 +18,7 @@ reviewable and should leave the repo in a working state.
 | Domain | `tts-api.aitransclips.com` |
 | VPS | `103.116.104.223` (Singapore) |
 | GitHub / GHCR | `nhandq-dev` → `ghcr.io/nhandq-dev/tts-worker` |
+| Access / deploy | Operator keeps root **password** SSH access (no SSH hardening). CI deploys via GitHub Actions SSH as `root` using a dedicated key. |
 
 ## Assumptions and technical notes to validate
 
@@ -249,23 +250,26 @@ T04, T05, T07.
 
 ---
 
-## T09 — Provision and harden the Singapore VPS
+## T09 — Provision the Singapore VPS
 
 **Goal:** Prepare `103.116.104.223` (Ubuntu 22.04.5 LTS) to host the stack.
 
 ### Acceptance Criteria
 - [ ] `docker-ce`, `docker-compose-plugin`, `caddy`, `ufw`, `fail2ban`, `unattended-upgrades`,
       `curl`, `jq`, `htop` installed; time sync healthy (`systemd-timesyncd` or `chrony`).
-- [ ] Non-root admin user created; SSH password login and root SSH login disabled; key-only auth.
+- [ ] Root SSH and password access left intact for the operator (no SSH hardening).
+- [ ] Optional CI deploy public key installed into root's `authorized_keys` for GitHub Actions.
 - [ ] `ufw` allows only `22`, `80`, `443`; provider firewall matches; worker port not public.
-- [ ] Docker log rotation configured; `/opt/tts-worker/.env` owned by root/deploy user with `600`.
+- [ ] Docker log rotation configured; `/opt/tts-worker/.env` owned by `root` with `600`.
 - [ ] On-disk layout created: `/opt/tts-worker/{releases,scripts,data/hf-cache,data/output}`.
 
 ### Technical Details
 - Keep Caddy as a host systemd service; the worker runs via `docker compose`.
+- The operator keeps password access; CI authenticates with a dedicated SSH key (T12).
 - `data/hf-cache` persists VieNeu/HF assets so cold starts do not redownload.
 - Set 1–2 GB swap as a safety net only; no horizontal scaling on day one.
 - HMAC timestamp validation depends on accurate clock; confirm drift after install.
+- Implemented by `deploy/scripts/provision.sh`.
 
 ### Dependencies
 T08 (assets must exist to copy).
@@ -323,12 +327,16 @@ T05, T06, T07.
 ### Acceptance Criteria
 - [ ] `.github/workflows/deploy.yml` triggers on push to `main`.
 - [ ] Builds `ghcr.io/nhandq-dev/tts-worker:<commit-sha>` (plus `latest`), pushes to GHCR.
-- [ ] SSHs to the VPS as the deploy user, updates `IMAGE_TAG`, runs `docker compose pull` + `up -d`.
+- [ ] SSHs to the VPS as `root` with a dedicated CI key, sets `IMAGE_TAG`, and runs
+      `deploy/scripts/deploy.sh` (`docker compose pull` + `up -d`).
 - [ ] Waits for internal `/health/ready` and public `/health/live` to pass.
 - [ ] On failure, automatically redeploys the previous recorded good tag via `rollback.sh`.
-- [ ] Required secrets configured: `VPS_HOST=103.116.104.223`, `VPS_USER`, `VPS_SSH_KEY`, `GHCR_TOKEN`.
+- [ ] Required secrets configured: `VPS_HOST=103.116.104.223`, `VPS_USER=root`,
+      `VPS_SSH_KEY` (private key), `GHCR_TOKEN`.
 
 ### Technical Details
+- The operator generates a CI key pair; the public half goes into root's `authorized_keys`
+  (see `CI_DEPLOY_PUBKEY` in `provision.sh`). The private half is stored only as `VPS_SSH_KEY`.
 - Record the previous good tag on the VPS (e.g. `/opt/tts-worker/releases/previous_tag`) for rollback.
 - Deploy only from `main`; single-container replacement with a short restart window is acceptable.
 - `HMAC_KEYS_JSON` and other runtime secrets live only in the VPS `.env`, never in the image or CI logs.
