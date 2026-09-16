@@ -7,18 +7,33 @@ import shutil
 import subprocess
 import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
-ProgressCallback = Optional[Callable[[int, str], None]]
+ProgressCallback = Callable[[int, str], None] | None
 
 VIENEU_DEFAULT_VOICE = os.getenv("VIENEU_DEFAULT_VOICE", "Adam")
 VIENEU_VOICES = [
-    "Minh Đức", "Phạm Tuyên", "Thái Sơn", "Xuân Vĩnh",
-    "Thanh Bình", "Trúc Ly", "Ngọc Linh", "Đoan Trang",
-    "Mai Anh", "Thục Đoan", "Minh Triết", "Thùy Dung",
-    "Quang Sơn", "Ngọc Trân", "Mỹ Duyên", "Quỳnh Anh",
-    "Đức Trí", "Kim Thanh", "Ngọc Huyền", "Adam",
+    "Minh Đức",
+    "Phạm Tuyên",
+    "Thái Sơn",
+    "Xuân Vĩnh",
+    "Thanh Bình",
+    "Trúc Ly",
+    "Ngọc Linh",
+    "Đoan Trang",
+    "Mai Anh",
+    "Thục Đoan",
+    "Minh Triết",
+    "Thùy Dung",
+    "Quang Sơn",
+    "Ngọc Trân",
+    "Mỹ Duyên",
+    "Quỳnh Anh",
+    "Đức Trí",
+    "Kim Thanh",
+    "Ngọc Huyền",
+    "Adam",
 ]
 
 EDGE_FALLBACK_VOICE = os.getenv("EDGE_FALLBACK_VOICE", "en-US-JennyNeural")
@@ -70,12 +85,12 @@ def _get_model():
     return _MODEL
 
 
-def _resolve_vieneu_voice(voice: Optional[str]) -> str:
+def _resolve_vieneu_voice(voice: str | None) -> str:
     value = (voice or "").strip()
     return value if value in VIENEU_VOICES else VIENEU_DEFAULT_VOICE
 
 
-def _resolve_edge_voice(language: str, voice: Optional[str]) -> str:
+def _resolve_edge_voice(language: str, voice: str | None) -> str:
     value = (voice or "").strip()
     if value:
         return value
@@ -116,10 +131,21 @@ def _concat(chunks: list[Path], dest: Path, workdir: Path) -> None:
     list_file = workdir / f"concat_{uuid.uuid4().hex}.txt"
     list_file.write_text("\n".join(f"file '{c.resolve()}'" for c in chunks), encoding="utf-8")
     try:
-        _run([
-            _ffmpeg(), "-y", "-f", "concat", "-safe", "0",
-            "-i", str(list_file), "-b:a", "128k", str(dest),
-        ])
+        _run(
+            [
+                _ffmpeg(),
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_file),
+                "-b:a",
+                "128k",
+                str(dest),
+            ]
+        )
     finally:
         list_file.unlink(missing_ok=True)
 
@@ -140,7 +166,7 @@ def _merge(chunks: list[Path], dest: Path, src_ext: str, fmt: str, workdir: Path
 
 def _synth_vieneu(
     text: str,
-    voice: Optional[str],
+    voice: str | None,
     dest: Path,
     fmt: str,
     workdir: Path,
@@ -172,7 +198,7 @@ async def _edge_chunk(text: str, voice: str, dest: Path) -> None:
 def _synth_edge(
     text: str,
     language: str,
-    voice: Optional[str],
+    voice: str | None,
     dest: Path,
     fmt: str,
     workdir: Path,
@@ -202,9 +228,9 @@ def _synth_edge(
 def generate_tts(
     text: str,
     language: str = "vi",
-    voice: Optional[str] = None,
-    out_path: Optional[str | Path] = None,
-    fmt: Optional[str] = None,
+    voice: str | None = None,
+    out_path: str | Path | None = None,
+    fmt: str | None = None,
     progress: ProgressCallback = None,
 ) -> Path:
     text = (text or "").strip()
