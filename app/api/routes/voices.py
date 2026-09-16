@@ -7,6 +7,6 @@ from app.services.voice_catalog import catalog
 router = APIRouter()
 
 
-@router.get("/voices")
+@router.get("/v1/voices")
 async def voices():
     return catalog()

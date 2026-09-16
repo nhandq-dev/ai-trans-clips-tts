@@ -34,6 +34,14 @@ def _get_model():
     return _MODEL
 
 
+def warm_up() -> None:
+    """Load the VieNeu model ahead of the first request.
+
+    Enabled via `READINESS_WARMUP`; edge-tts is remote and needs no warmup.
+    """
+    _get_model()
+
+
 def _resolve_vieneu_voice(voice: str | None) -> str:
     value = (voice or "").strip()
     return value if value in VIENEU_VOICES else get_settings().vieneu_default_voice

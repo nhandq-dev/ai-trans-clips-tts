@@ -18,10 +18,3 @@ class TTSRequest(BaseModel):
         if len(value) > limit:
             raise ValueError(f"text must be at most {limit} characters")
         return value
-
-
-class TTSResponse(BaseModel):
-    engine: str
-    language: str
-    voice: str
-    output_path: str

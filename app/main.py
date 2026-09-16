@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
+import logging
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,19 +16,34 @@ from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
+from app.services.synthesis import warm_up
 
 settings = get_settings()
 configure_logging(settings)
 
+logger = logging.getLogger("tts-worker")
+
 if settings.hf_home is not None:
     os.environ.setdefault("HF_HOME", str(settings.hf_home))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if settings.readiness_warmup:
+        logger.info("warmup_started")
+        try:
+            await asyncio.to_thread(warm_up)
+            logger.info("warmup_finished")
+        except Exception:
+            logger.exception("warmup_failed")
+    yield
 
 
 class WorkerAuthMiddleware(BaseHTTPMiddleware):
     """Transitional static-secret auth; replaced by HMAC signing in T05."""
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/health":
+        if request.url.path.startswith("/health"):
             return await call_next(request)
         if not settings.tts_worker_secret:
             return JSONResponse(
@@ -40,6 +58,7 @@ class WorkerAuthMiddleware(BaseHTTPMiddleware):
 app = FastAPI(
     title="TTS Worker",
     version="1.0.0",
+    lifespan=lifespan,
     docs_url=None if settings.docs_disabled else "/docs",
     redoc_url=None if settings.docs_disabled else "/redoc",
     openapi_url=None if settings.docs_disabled else "/openapi.json",
