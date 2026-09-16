@@ -58,8 +58,7 @@ class Settings(BaseSettings):
     access_log_enabled: bool = True
     readiness_warmup: bool = False
 
-    # Transitional: replaced by HMAC request signing (T05).
-    tts_worker_secret: str = ""
+    # Transitional: CORS is removed in T06.
     cors_allow_origins: str = "*"
 
     _hmac_keys: dict[str, str] = PrivateAttr(default_factory=dict)

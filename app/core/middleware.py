@@ -5,12 +5,14 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 
+from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
-from starlette.types import ASGIApp
+from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.config import Settings
+from app.core.security import SignatureError, SignatureVerifier
 
 logger = logging.getLogger("tts-worker.access")
 
@@ -60,3 +62,80 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 "text_length": getattr(request.state, "text_length", None),
             },
         )
+
+
+class HMACAuthMiddleware:
+    """Verify HMAC-signed requests before they reach the routes.
+
+    `/health/*` stays unauthenticated so liveness/readiness probes need no signature. The request
+    body is buffered once, verified, and then replayed to the downstream application.
+    """
+
+    def __init__(self, app: ASGIApp, settings: Settings) -> None:
+        self._app = app
+        self._verifier = SignatureVerifier(settings)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("path", "").startswith("/health"):
+            await self._app(scope, receive, send)
+            return
+
+        body = await self._read_body(receive)
+
+        try:
+            self._verifier.verify(
+                method=scope.get("method", ""),
+                path_and_query=self._path_and_query(scope),
+                headers=Headers(scope=scope),
+                body=body,
+            )
+        except SignatureError as exc:
+            await self._unauthorized(scope, receive, send, str(exc))
+            return
+
+        await self._app(scope, self._replay(body, receive), send)
+
+    @staticmethod
+    async def _read_body(receive: Receive) -> bytes:
+        body = b""
+        while True:
+            message = await receive()
+            if message["type"] == "http.request":
+                body += message.get("body", b"")
+                if not message.get("more_body", False):
+                    break
+            elif message["type"] == "http.disconnect":
+                break
+        return body
+
+    @staticmethod
+    def _path_and_query(scope: Scope) -> str:
+        path = scope.get("path", "")
+        query = scope.get("query_string", b"").decode("latin-1")
+        return f"{path}?{query}" if query else path
+
+    @staticmethod
+    def _replay(body: bytes, receive: Receive) -> Receive:
+        replayed = False
+
+        async def replay_receive() -> Message:
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        return replay_receive
+
+    @staticmethod
+    async def _unauthorized(scope: Scope, receive: Receive, send: Send, reason: str) -> None:
+        state = scope.get("state") or {}
+        response = JSONResponse(
+            status_code=401,
+            content={
+                "error": "unauthorized",
+                "reason": reason,
+                "request_id": state.get("request_id"),
+            },
+        )
+        await response(scope, receive, send)

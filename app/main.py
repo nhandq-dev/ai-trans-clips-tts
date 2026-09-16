@@ -1,21 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.routes import health, tts, voices
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
-from app.core.middleware import RequestContextMiddleware
+from app.core.middleware import HMACAuthMiddleware, RequestContextMiddleware
 from app.services.synthesis import warm_up
 
 settings = get_settings()
@@ -39,22 +36,6 @@ async def lifespan(app: FastAPI):
     yield
 
 
-class WorkerAuthMiddleware(BaseHTTPMiddleware):
-    """Transitional static-secret auth; replaced by HMAC signing in T05."""
-
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path.startswith("/health"):
-            return await call_next(request)
-        if not settings.tts_worker_secret:
-            return JSONResponse(
-                status_code=503, content={"error": "TTS_WORKER_SECRET not configured"}
-            )
-        provided = request.headers.get("X-Worker-Secret", "")
-        if not hmac.compare_digest(provided, settings.tts_worker_secret):
-            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
-        return await call_next(request)
-
-
 app = FastAPI(
     title="TTS Worker",
     version="1.0.0",
@@ -72,7 +53,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(WorkerAuthMiddleware)
+app.add_middleware(HMACAuthMiddleware, settings=settings)
 app.add_middleware(RequestContextMiddleware, settings=settings)
 
 app.include_router(health.router)
