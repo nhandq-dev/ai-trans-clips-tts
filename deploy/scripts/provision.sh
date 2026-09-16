@@ -129,6 +129,17 @@ systemctl restart docker
 log "Creating ${APP_DIR} layout"
 install -d -m 750 "${APP_DIR}" "${APP_DIR}/releases" "${APP_DIR}/scripts"
 install -d -m 750 "${APP_DIR}/data" "${APP_DIR}/data/hf-cache" "${APP_DIR}/data/output"
+
+# Copy the deploy assets from this repository checkout into APP_DIR.
+DEPLOY_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${DEPLOY_SRC}/docker-compose.yml" && "${DEPLOY_SRC}" != "${APP_DIR}" ]]; then
+	log "Copying deploy assets from ${DEPLOY_SRC}"
+	install -m 644 "${DEPLOY_SRC}/docker-compose.yml" "${APP_DIR}/docker-compose.yml"
+	install -m 644 "${DEPLOY_SRC}/Caddyfile" "${APP_DIR}/Caddyfile"
+	install -m 640 "${DEPLOY_SRC}/.env.example" "${APP_DIR}/.env.example"
+	install -m 755 "${DEPLOY_SRC}"/scripts/*.sh "${APP_DIR}/scripts/"
+fi
+
 chown -R "${ADMIN_USER}:${ADMIN_USER}" "${APP_DIR}"
 
 if [[ ! -f "${APP_DIR}/.env" && -f "${APP_DIR}/.env.example" ]]; then
@@ -179,10 +190,7 @@ cat <<EOF
 
 Next steps:
   1. Confirm the provider firewall allows 22/80/443 and nothing else.
-  2. Ensure the deploy assets are in ${APP_DIR} (docker-compose.yml, Caddyfile,
-     scripts/, .env.example). If you copied them after running this script,
-     re-run it (idempotent) so the Caddyfile is installed.
-  3. Fill in ${APP_DIR}/.env with real HMAC keys and set IMAGE_TAG.
-  4. Point the PA Vietnam DNS A record for ${PUBLIC_DOMAIN} at this host (T10).
-  5. Log in as ${ADMIN_USER} (key-only) and verify: bash ${APP_DIR}/scripts/healthcheck.sh
+  2. Fill in ${APP_DIR}/.env with real HMAC keys and set IMAGE_TAG.
+  3. Point the PA Vietnam DNS A record for ${PUBLIC_DOMAIN} at this host (T10).
+  4. Log in as ${ADMIN_USER} (key-only) and verify: bash ${APP_DIR}/scripts/healthcheck.sh
 EOF
