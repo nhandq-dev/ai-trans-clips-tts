@@ -1,20 +1,38 @@
-# TTS Worker — Implementation & Deployment Plan
+# TTS Worker — Deployment Guide
 
-This document is the implementation plan for the standalone `tts-worker` repository. It covers the
-worker service itself, its repository layout, and its production deployment on a Singapore VPS behind
-a reverse proxy at `https://tts-api.yourdomain.com`.
+Production deployment guide for the standalone `tts-worker` service: the worker itself, its
+repository layout, and its deployment on a Singapore VPS behind a reverse proxy at
+`https://tts-api.aitransclips.com`.
 
-Scope: **worker service + VPS only.** Anything about the main API, frontend, or other services is out
-of scope except where it defines the request contract the worker must verify.
+Scope: **worker service + VPS only.** Anything about the main API, frontend, or other services is
+out of scope except where it defines the request contract the worker must verify.
+
+## As-built production configuration
+
+| Item | Value |
+|---|---|
+| Public endpoint | `https://tts-api.aitransclips.com` |
+| VPS | `103.116.104.223` (Singapore, Ubuntu 22.04.5 LTS) |
+| Reverse proxy | Caddy on the host (systemd), automatic Let's Encrypt TLS |
+| Worker runtime | Docker Compose; image `ghcr.io/nhandq-dev/tts-worker` |
+| Networking | Worker published on **loopback only** (`127.0.0.1:8004`); Caddy proxies to it |
+| DNS | **Vercel DNS** is authoritative (`ns1,ns2.vercel-dns.com`); PA Vietnam NS removed |
+| Auth | HMAC-signed requests on `/v1/*`; `/health/*` unauthenticated |
+| CI/CD | GitHub Actions → GHCR → SSH deploy (as `root` with a dedicated key) |
+| Repo layout | `app/` package, `deploy/`, `tests/`, `.github/workflows/` |
+
+Implementation history and decisions are tracked in `DEPLOYMENT_TICKETS.md`; day-one operations are
+in `deploy/MONITORING.md`.
+
 
 ## Architecture
 
 ```text
 Authorized caller (main API)
-  -> HTTPS request to https://tts-api.yourdomain.com
+  -> HTTPS request to https://tts-api.aitransclips.com
   -> HMAC-signed request headers
 Caddy on Singapore VPS (:443)
-  -> reverse proxy to private Docker network
+  -> reverse proxy to 127.0.0.1:8004 (loopback; worker port is not public)
 FastAPI tts-worker container
   -> VieNeu (Vietnamese) / edge-tts (other languages) / ffmpeg
 ```
@@ -24,8 +42,8 @@ Key decisions:
 1. `tts-worker` lives in its own repository with its own CI/CD pipeline.
 2. It runs on a Singapore VPS to keep latency low for the primary caller.
 3. Only `443` and `80` are exposed publicly (TLS + certificate issuance).
-4. The worker process is private on an internal Docker network, never internet-facing.
-5. It is addressed by `https://tts-api.yourdomain.com`, not a raw IP, so TLS and cert management stay standard.
+4. The worker is published only on loopback (`127.0.0.1:8004`), never internet-facing.
+5. It is addressed by `https://tts-api.aitransclips.com`, not a raw IP, so TLS and cert management stay standard.
 6. Requests are authenticated with HMAC request signing, not source IP allowlisting.
 7. Start with synchronous generation; add async jobs only if real traffic requires it.
 
@@ -44,7 +62,7 @@ Why this is the right balance:
 The repository is a small, self-contained Python service with its deployment assets included.
 
 ```text
-tts-worker/
+tts-worker/  (repo: ai-trans-clips-tts)
   app/
     main.py
     api/
@@ -68,18 +86,21 @@ tts-worker/
       tts.py
       health.py
   tests/
+    conftest.py
     test_health.py
     test_signature_auth.py
     test_tts_validation.py
-    test_voice_catalog.py
   deploy/
     docker-compose.yml
     Caddyfile
     .env.example
+    MONITORING.md
     scripts/
+      provision.sh
       deploy.sh
       rollback.sh
       healthcheck.sh
+      smoke.py
   .github/
     workflows/
       ci.yml
@@ -89,6 +110,7 @@ tts-worker/
   uv.lock
   README.md
   DEPLOYMENT.md
+  DEPLOYMENT_TICKETS.md
   CHANGELOG.md
 ```
 
@@ -290,18 +312,16 @@ Recommended:
 
 ### Host hardening
 
-Apply these defaults immediately:
+Applied by `deploy/scripts/provision.sh`:
 
-1. Create a non-root admin user.
-2. Disable SSH password login.
-3. Disable root SSH login.
-4. Use SSH keys only.
-5. Enable `ufw`.
-6. Open only `22`, `80`, and `443` publicly.
-7. Do not open the worker container port publicly.
-8. Enable unattended security updates.
-9. Set Docker log rotation limits.
-10. Restrict permissions on `/opt/tts-worker/.env` to root and deploy user only.
+1. Root **password** SSH access is kept for the operator (no SSH hardening).
+2. A dedicated CI key is added to root's `authorized_keys` for GitHub Actions deploys.
+3. Enable `ufw`.
+4. Open only `22`, `80`, and `443` publicly.
+5. Do not open the worker container port publicly (loopback publish only).
+6. Enable unattended security updates.
+7. Set Docker log rotation limits.
+8. Restrict `/opt/tts-worker/.env` to `root:600`.
 
 Recommended `ufw` exposure:
 
@@ -378,7 +398,7 @@ Why Caddy:
 
 Caddy responsibilities:
 
-1. terminate TLS for `tts-api.yourdomain.com`
+1. terminate TLS for `tts-api.aitransclips.com`
 2. redirect HTTP to HTTPS
 3. reverse proxy to the private worker endpoint
 4. enforce request body limits
@@ -391,7 +411,7 @@ Keep the worker private by routing only to an internal Docker network alias like
 
 Keep monitoring practical:
 
-1. external uptime check against `https://tts-api.yourdomain.com/health/ready`
+1. external uptime check against `https://tts-api.aitransclips.com/health/ready`
 2. VPS provider CPU/RAM/disk alerts if available
 3. log aggregation later if needed
 
@@ -413,56 +433,43 @@ Do not start with a full observability stack unless the platform already uses on
 
 ---
 
-## 3. PA Vietnam DNS setup
+## 3. DNS setup (Vercel)
 
-DNS is managed at PA Vietnam, outside Vercel. This does not change the architecture; it only defines
-where the `A` record is created.
+The zone `aitransclips.com` is authoritative at **Vercel DNS** (`ns1,ns2.vercel-dns.com`). The
+earlier PA Vietnam nameservers were removed from the registrar, so all records live in Vercel.
 
-### Recommended DNS record
+### Required records
 
-Create this record in the PA Vietnam DNS zone for the root domain:
+| Type | Name | Value | TTL |
+|---|---|---|---|
+| `A` | `tts-api` | `103.116.104.223` | 300 during rollout, then 3600 |
 
-| Type | Name | Value |
-|---|---|---|
-| `A` | `tts-api` | `<public IPv4 of Singapore VPS>` |
-
-Optional, if the VPS has stable IPv6:
-
-| Type | Name | Value |
-|---|---|---|
-| `AAAA` | `tts-api` | `<public IPv6 of Singapore VPS>` |
-
-TTL recommendation:
-
-1. `300` seconds during initial rollout or migration
-2. `3600` once stable
+Email and mail-authentication records were migrated to Vercel before removing PA Vietnam: `@` MX
+(`mail92227.maychuemail.net` / `.com`), `@` TXT SPF, `mx` and `mail` CNAMEs, `send` MX/TXT (Amazon
+SES/Resend), `resend._domainkey` TXT, and a single `_dmarc` TXT.
 
 ### SSL and certificate considerations
 
-Preferred SSL path:
-
-1. point the DNS `A` record to the VPS
+1. point the `A` record at the VPS
 2. open ports `80` and `443`
-3. start Caddy with `tts-api.yourdomain.com` in the config
-4. let Caddy obtain and renew certificates automatically
-
-This works regardless of PA Vietnam being the DNS host, because ACME HTTP-01 and TLS-ALPN only
-require the hostname to resolve to the VPS and the ports to be reachable.
+3. Caddy obtains and renews certificates automatically (HTTP-01 or TLS-ALPN-01)
+4. keep only `ns1,ns2.vercel-dns.com` at the registrar to avoid split-brain resolution
 
 Operational notes:
 
-1. DNS must propagate before the first certificate issuance succeeds.
+1. DNS must propagate before the first certificate issuance succeeds. If Caddy retried while DNS
+   still pointed elsewhere, restart it (`systemctl restart caddy`) to trigger an immediate retry.
 2. Caddy needs a persistent writable data directory for certificate storage.
-3. If port `80` is blocked, issuance requires a DNS-based challenge flow, which adds complexity and should be avoided unless necessary.
+3. If port `80` is blocked, issuance requires a DNS-based challenge flow, which adds complexity and
+   should be avoided unless necessary.
 
-### DNS cutover checklist
+### DNS checklist
 
-1. Lower TTL before cutover.
-2. Create the `A` record for `tts-api`.
-3. Confirm DNS resolves to the VPS from outside the network.
-4. Open `80` and `443` on the VPS firewall and the provider firewall.
-5. Start Caddy and verify certificate issuance.
-6. Verify `https://tts-api.yourdomain.com/health/live` from a public network.
+1. Create/confirm the `A` record `tts-api` → `103.116.104.223`.
+2. Confirm it resolves to the VPS from outside (`dig +short A tts-api.aitransclips.com @8.8.8.8`).
+3. Open `80` and `443` on the VPS and provider firewalls.
+4. Verify certificate issuance and `https://tts-api.aitransclips.com/health/live`.
+5. Remove the PA Vietnam nameservers, leaving only Vercel.
 
 ---
 
@@ -574,7 +581,7 @@ TLS provides:
 
 Requirements:
 
-1. the public endpoint is `https://tts-api.yourdomain.com`
+1. the public endpoint is `https://tts-api.aitransclips.com`
 2. do not disable TLS verification on the caller
 3. do not use self-signed certs in production
 4. do not use `http://` over the public internet
@@ -661,12 +668,12 @@ Release model:
 
 Deploy job responsibilities:
 
-1. SSH to VPS as the deploy user
-2. update the image tag in `/opt/tts-worker/.env` or the compose env
-3. `docker compose pull`
-4. `docker compose up -d`
-5. wait for health checks to pass (internal worker and public HTTPS endpoint)
-6. if health fails, redeploy the previous image tag automatically
+1. SSH to the VPS as `root` with the dedicated CI key
+2. sync `deploy/scripts` and run `deploy/scripts/deploy.sh <sha>` (retires the legacy service,
+   sets `IMAGE_TAG`, `docker compose pull` + `up -d`)
+3. wait for internal `/health/ready` to pass
+4. run the signed smoke test and verify the public `/health/live` endpoint
+5. if any step fails, run `deploy/scripts/rollback.sh` to restore the previous tag
 
 ### Minimal-downtime deployment strategy
 
@@ -758,7 +765,7 @@ Do not:
 
 ## 6. Reference configuration
 
-These are starting points, not final configs.
+These reflect the files in the repository (`Dockerfile`, `deploy/docker-compose.yml`, `deploy/Caddyfile`).
 
 ### Dockerfile
 
@@ -766,8 +773,10 @@ These are starting points, not final configs.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/data/hf-cache
+    HF_HOME=/data/hf-cache \
+    PATH="/app/.venv/bin:$PATH"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg curl \
@@ -791,24 +800,22 @@ EXPOSE 8004
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8004/health/live || exit 1
 
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8004"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8004"]
 ```
 
-### docker-compose.yml
+### docker-compose.yml (`deploy/docker-compose.yml`)
 
 ```yaml
 services:
   tts-worker:
-    image: ghcr.io/OWNER/tts-worker:${IMAGE_TAG:-latest}
+    image: ghcr.io/nhandq-dev/tts-worker:${IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file: .env
-    expose:
-      - "8004"
+    ports:
+      - "127.0.0.1:8004:8004"
     volumes:
       - ./data/hf-cache:/data/hf-cache
       - ./data/output:/data/output
-    networks:
-      - tts
     logging:
       driver: json-file
       options:
@@ -819,41 +826,39 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-networks:
-  tts:
-    name: tts
+      start_period: 20s
 ```
 
-### Caddyfile
+### Caddyfile (`deploy/Caddyfile`)
 
 ```caddyfile
-tts-api.yourdomain.com {
-    encode zstd gzip
+tts-api.aitransclips.com {
+	encode zstd gzip
 
-    request_body {
-        max_size 2MB
-    }
+	request_body {
+		max_size 2MB
+	}
 
-    reverse_proxy tts-worker:8004 {
-        transport http {
-            dial_timeout 2s
-            response_header_timeout 90s
-        }
-    }
+	reverse_proxy 127.0.0.1:8004 {
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 90s
+		}
+	}
 
-    log {
-        output file /var/log/caddy/tts-api.access.log
-        format json
-    }
+	log {
+		output file /var/log/caddy/tts-api.access.log
+		format json
+	}
 }
 ```
 
 Notes:
 
 1. Caddy obtains and renews certificates automatically once DNS points to the VPS and `80`/`443` are open.
-2. The worker container is reachable only on the internal `tts` Docker network.
-3. Tune `response_header_timeout` to match the worker's maximum synchronous processing time.
+2. The worker is published only on loopback (`127.0.0.1:8004`); host-systemd Caddy proxies to it. The container port is never exposed publicly.
+3. The bind-mounted `./data` directories must be writable by uid 10001 (the container user); `provision.sh` handles this.
+4. Tune `response_header_timeout` to match the worker's maximum synchronous processing time.
 
 ---
 
@@ -866,8 +871,8 @@ Notes:
 3. Add Dockerfile, Compose file, Caddyfile, `.env.example`, CI workflow, and deploy workflow.
 4. Implement HMAC middleware and replay protection.
 5. Add `live` and `ready` health endpoints.
-6. Provision the Singapore VPS and harden it.
-7. Add the PA Vietnam DNS `A` record.
+6. Provision the Singapore VPS (packages, ufw, Docker, Caddy, layout).
+7. Add the Vercel DNS `A` record for `tts-api`.
 8. Verify HTTPS with Caddy.
 
 ### Phase 2 — production hardening
@@ -910,8 +915,8 @@ Notes:
 
 1. `tts-worker` in its own repository
 2. containerized worker on a Singapore Ubuntu 22.04.5 VPS
-3. `Caddy` on the host serving `https://tts-api.yourdomain.com`
-4. worker reachable only through the reverse proxy on an internal Docker network
+3. `Caddy` on the host serving `https://tts-api.aitransclips.com`
+4. worker reachable only through the reverse proxy on loopback (`127.0.0.1:8004`)
 5. `HTTPS + HMAC-signed requests + timestamp + nonce` for authentication
 6. GitHub Actions deploying immutable container images to the VPS with health-checked rollback
 
