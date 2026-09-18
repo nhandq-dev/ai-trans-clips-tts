@@ -32,6 +32,9 @@ jobs:
       - name: Format check
         run: uv run ruff format --check .
 
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Tests
         run: uv run pytest
 

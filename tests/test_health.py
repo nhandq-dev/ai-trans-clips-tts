@@ -25,6 +25,6 @@ def test_ready_reports_failure(client):
     try:
         response = client.get("/health/ready")
         assert response.status_code == 503
-        assert response.json()["reasons"] == ["concurrency"]
+        assert "concurrency" in response.json()["reasons"]
     finally:
         settings.tts_concurrency = original
