@@ -110,6 +110,9 @@ if [[ -f "${DEPLOY_SRC}/docker-compose.yml" && "${DEPLOY_SRC}" != "${APP_DIR}" ]
 fi
 
 chown -R root:root "${APP_DIR}"
+# The container runs as uid 10001 (worker); the bind-mounted data volumes must be
+# writable by it, so ownership is transferred from root.
+chown -R 10001:10001 "${APP_DIR}/data"
 
 if [[ ! -f "${APP_DIR}/.env" && -f "${APP_DIR}/.env.example" ]]; then
 	install -m 600 "${APP_DIR}/.env.example" "${APP_DIR}/.env"
