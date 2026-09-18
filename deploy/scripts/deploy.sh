@@ -20,6 +20,15 @@ SLEEP_SECONDS="${SLEEP_SECONDS:-2}"
 mkdir -p "${STATE_DIR}"
 cd "${COMPOSE_DIR}"
 
+# Retire the legacy host-venv service if it is still running: it binds :8004 and would
+# prevent the container from starting. Idempotent once removed.
+if systemctl list-unit-files 2>/dev/null | grep -q '^tts-worker.service'; then
+	echo "Retiring legacy tts-worker.service"
+	systemctl disable --now tts-worker.service || true
+	rm -f /etc/systemd/system/tts-worker.service
+	systemctl daemon-reload
+fi
+
 if [[ -f "${CURRENT_TAG_FILE}" ]]; then
 	cp "${CURRENT_TAG_FILE}" "${PREVIOUS_TAG_FILE}"
 fi
