@@ -68,8 +68,8 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          scp -i ~/.ssh/id_ed25519 deploy/scripts/*.sh "$VPS_USER@$VPS_HOST:/opt/tts-worker/scripts/"
-          ssh -i ~/.ssh/id_ed25519 "$VPS_USER@$VPS_HOST" "chmod +x /opt/tts-worker/scripts/*.sh"
+          scp -i ~/.ssh/id_ed25519 deploy/scripts/*.sh deploy/scripts/*.py "$VPS_USER@$VPS_HOST:/opt/tts-worker/scripts/"
+          ssh -i ~/.ssh/id_ed25519 "$VPS_USER@$VPS_HOST" "chmod +x /opt/tts-worker/scripts/*.sh /opt/tts-worker/scripts/*.py"
 
       - name: Deploy
         env:
@@ -85,6 +85,14 @@ jobs:
           fi
           ssh -i ~/.ssh/id_ed25519 "$VPS_USER@$VPS_HOST" \
             "bash /opt/tts-worker/scripts/deploy.sh $IMAGE_TAG"
+
+      - name: Smoke test
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "$VPS_USER@$VPS_HOST" \
+            "SMOKE_BASE_URL=https://tts-api.aitransclips.com python3 /opt/tts-worker/scripts/smoke.py"
 
       - name: Verify public endpoint
         run: curl -fsS --retry 5 --retry-delay 5 https://tts-api.aitransclips.com/health/live
