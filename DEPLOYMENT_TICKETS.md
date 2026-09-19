@@ -133,7 +133,8 @@ T01. Recommended after T02 to avoid editing files twice.
 - [ ] `POST /v1/tts` generates and returns audio bytes (`audio/mpeg` or `audio/wav`) and deletes
       the temp file after the response.
 - [ ] Legacy routes `/health`, `/voices`, `/tts`, `/tts/meta` are removed.
-- [ ] `DISABLE_DOCS=true` disables `/docs` and `/openapi.json`; enabled only outside production.
+- [ ] `DISABLE_DOCS=true` disables `/docs`, `/redoc`, and `/openapi.json`; when enabled in
+      production they require HTTP Basic auth via `DOCS_PASSWORD`.
 
 ### Technical Details
 - Files: `app/api/routes/health.py`, `voices.py`, `tts.py`; schemas in `app/schemas/tts.py`,

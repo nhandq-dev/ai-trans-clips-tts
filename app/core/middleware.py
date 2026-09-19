@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hmac
 import logging
 import time
 import uuid
@@ -15,6 +17,19 @@ from app.core.config import Settings
 from app.core.security import SignatureError, SignatureVerifier
 
 logger = logging.getLogger("tts-worker.access")
+
+_HEALTH_PREFIX = "/health"
+_DOCS_PATHS = ("/docs", "/redoc", "/openapi.json")
+
+
+def _is_docs_path(path: str) -> bool:
+    """Return True for the interactive docs and the OpenAPI schema."""
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in _DOCS_PATHS)
+
+
+def _is_hmac_exempt(path: str) -> bool:
+    """Paths that skip HMAC: health probes and the password-gated docs."""
+    return path.startswith(_HEALTH_PREFIX) or _is_docs_path(path)
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
@@ -64,6 +79,53 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         )
 
 
+class DocsAuthMiddleware:
+    """Password-protect the interactive API docs.
+
+    `/docs`, `/redoc`, and `/openapi.json` are exempt from HMAC so a browser can load them, and
+    are instead gated by HTTP Basic auth whenever `DOCS_PASSWORD` is set. Production requires a
+    password (enforced in `Settings`), so the docs stay reachable without being public. When no
+    password is configured the docs are left open (development convenience).
+    """
+
+    def __init__(self, app: ASGIApp, settings: Settings) -> None:
+        self._app = app
+        self._password = settings.docs_password
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if (
+            scope["type"] != "http"
+            or not self._password
+            or not _is_docs_path(scope.get("path", ""))
+        ):
+            await self._app(scope, receive, send)
+            return
+
+        if self._authorized(Headers(scope=scope)):
+            await self._app(scope, receive, send)
+            return
+
+        response = Response(
+            content="Unauthorized",
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="docs"'},
+        )
+        await response(scope, receive, send)
+
+    def _authorized(self, headers: Headers) -> bool:
+        scheme, _, credentials = headers.get("authorization", "").partition(" ")
+        if scheme.lower() != "basic" or not credentials:
+            return False
+        try:
+            decoded = base64.b64decode(credentials, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return False
+        _, separator, password = decoded.partition(":")
+        if not separator:
+            return False
+        return hmac.compare_digest(password, self._password)
+
+
 class HMACAuthMiddleware:
     """Verify HMAC-signed requests before they reach the routes.
 
@@ -78,7 +140,7 @@ class HMACAuthMiddleware:
         self._max_body_bytes = settings.request_max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope.get("path", "").startswith("/health"):
+        if scope["type"] != "http" or _is_hmac_exempt(scope.get("path", "")):
             await self._app(scope, receive, send)
             return
 

@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `DOCS_PASSWORD`: HTTP Basic auth for `/docs`, `/redoc`, and `/openapi.json`.
+
+### Changed
+
+- Docs are no longer auto-disabled in production. They stay reachable but require
+  `DOCS_PASSWORD`; startup fails in production when docs are enabled without a password.
+  Set `DISABLE_DOCS=true` to remove them entirely.
+
 ## [1.0.0] - 2026-09-18
 
 Initial production release of the standalone `tts-worker`.

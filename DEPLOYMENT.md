@@ -137,7 +137,9 @@ Optional later, only if runtime grows:
 2. `GET /v1/jobs/:id`
 3. `GET /v1/jobs/:id/audio`
 
-Do not expose Swagger/OpenAPI publicly in production. Default: disable docs in production.
+Swagger/OpenAPI may be exposed in production, but only behind HTTP Basic auth: set
+`DOCS_PASSWORD` and the docs (`/docs`, `/redoc`, `/openapi.json`) require it. `DOCS_PASSWORD` is
+mandatory in production unless `DISABLE_DOCS=true` disables the docs entirely.
 
 ### Configuration and environment variables
 
@@ -149,7 +151,8 @@ Application:
 | `LOG_LEVEL` | `info`, `warning`, `error`, `debug` |
 | `HOST` | Internal bind host, `0.0.0.0` inside the container |
 | `PORT` | Internal app port, `8004` |
-| `DISABLE_DOCS` | Disable `/docs` and `/openapi.json` in production |
+| `DISABLE_DOCS` | Disable `/docs`, `/redoc`, and `/openapi.json` entirely |
+| `DOCS_PASSWORD` | Basic-auth password for the docs; required in production when docs are enabled |
 
 TTS runtime:
 

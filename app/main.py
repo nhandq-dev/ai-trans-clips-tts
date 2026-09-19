@@ -11,7 +11,7 @@ from app.api.routes import health, tts, voices
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
-from app.core.middleware import HMACAuthMiddleware, RequestContextMiddleware
+from app.core.middleware import DocsAuthMiddleware, HMACAuthMiddleware, RequestContextMiddleware
 from app.services.synthesis import warm_up
 
 settings = get_settings()
@@ -46,6 +46,7 @@ app = FastAPI(
 
 register_exception_handlers(app)
 app.add_middleware(HMACAuthMiddleware, settings=settings)
+app.add_middleware(DocsAuthMiddleware, settings=settings)
 app.add_middleware(RequestContextMiddleware, settings=settings)
 
 app.include_router(health.router)

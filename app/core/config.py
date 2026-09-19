@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8004
     disable_docs: bool = False
+    docs_password: str = ""
 
     # TTS runtime
     max_text_length: int = 5000
@@ -87,6 +88,11 @@ class Settings(BaseSettings):
         self._hmac_keys = self._parse_hmac_keys()
         if self.is_production and not self._hmac_keys:
             raise ValueError("HMAC_KEYS_JSON is required when APP_ENV=production")
+        if self.is_production and not self.docs_disabled and not self.docs_password:
+            raise ValueError(
+                "DOCS_PASSWORD is required when docs are enabled in production "
+                "(set DOCS_PASSWORD or DISABLE_DOCS=true)"
+            )
         if self.sync_max_text_length > self.max_text_length:
             raise ValueError("SYNC_MAX_TEXT_LENGTH cannot exceed MAX_TEXT_LENGTH")
         return self
@@ -122,8 +128,12 @@ class Settings(BaseSettings):
 
     @property
     def docs_disabled(self) -> bool:
-        """Docs are disabled in production or when explicitly requested."""
-        return self.disable_docs or self.is_production
+        """Docs are only disabled when explicitly requested.
+
+        In production the docs stay reachable but are gated behind `DOCS_PASSWORD`
+        (enforced in `_validate`), so they are never exposed without a password.
+        """
+        return self.disable_docs
 
 
 @lru_cache

@@ -20,8 +20,10 @@ cp .env.example .env                      # then edit secrets
 uv run uvicorn app.main:app --reload --port 8004
 ```
 
-The worker binds `0.0.0.0:8004`. In development, `/docs` and `/openapi.json` are enabled; they are
-disabled automatically when `APP_ENV=production` (or `DISABLE_DOCS=true`).
+The worker binds `0.0.0.0:8004`. `/docs`, `/redoc`, and `/openapi.json` are always enabled unless
+`DISABLE_DOCS=true`. In production they stay reachable but require HTTP Basic auth with
+`DOCS_PASSWORD` (any username, `DOCS_PASSWORD` as the password); `DOCS_PASSWORD` is mandatory in
+production unless docs are disabled.
 
 ## API
 
@@ -98,7 +100,8 @@ Environment variables (see `.env.example` for the full contract):
 | `APP_ENV` | `development` \| `staging` \| `production` |
 | `LOG_LEVEL` | `debug` \| `info` \| `warning` \| `error` |
 | `HOST`, `PORT` | bind address (default `0.0.0.0:8004`) |
-| `DISABLE_DOCS` | disable `/docs` + `/openapi.json` |
+| `DISABLE_DOCS` | disable `/docs`, `/redoc`, `/openapi.json` |
+| `DOCS_PASSWORD` | password (Basic auth) for the docs; required in production when docs are enabled |
 | `MAX_TEXT_LENGTH`, `SYNC_MAX_TEXT_LENGTH` | input limits |
 | `TTS_CONCURRENCY` | app-level concurrency cap |
 | `TTS_FORMAT`, `TTS_OUTPUT_DIR` | default format and output dir |
