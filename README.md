@@ -1,9 +1,22 @@
-# tts-worker
+# ai-trans-clips workers
 
-Standalone text-to-speech worker: **VieNeu** for Vietnamese, **edge-tts** for other languages,
-**ffmpeg** for merging/transcoding. FastAPI + Uvicorn, deployed as a container behind Caddy.
+Two standalone Python workers that share one VPS and one HMAC key store. Both are FastAPI +
+Uvicorn, deployed as containers behind Caddy on the same hostname (separated by path prefix).
 
-- Public endpoint: `https://tts-api.aitransclips.com`
+| | TTS worker | Video worker |
+|---|---|---|
+| Source | `app/` | `video-worker/` |
+| Image | `ghcr.io/nhandq-dev/tts-worker` | `ghcr.io/nhandq-dev/video-worker` |
+| Port (loopback) | `127.0.0.1:8004` | `127.0.0.1:8005` |
+| Public path | `https://tts-api.aitransclips.com/*` | `https://tts-api.aitransclips.com/video/*` |
+| Deploy dir | `/opt/tts-worker` | `/opt/video-worker` |
+| Auth | HMAC `X-TTS-*` | HMAC `X-Video-*` (same `HMAC_KEYS_JSON`) |
+
+## TTS worker
+
+Text-to-speech: **VieNeu** for Vietnamese, **edge-tts** for other languages, **ffmpeg** for
+merging/transcoding.
+
 - API: `GET /health/live`, `GET /health/ready`, `GET /v1/voices`, `POST /v1/tts`
 - Auth: HMAC-signed requests on `/v1/*`; health endpoints are unauthenticated.
 
@@ -141,16 +154,38 @@ The image runs as non-root (uid 10001), installs ffmpeg, uses `HF_HOME=/data/hf-
 See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the production setup, [`deploy/MONITORING.md`](deploy/MONITORING.md)
 for operations, and [`DEPLOYMENT_TICKETS.md`](DEPLOYMENT_TICKETS.md) for the implementation history.
 
+## Video worker
+
+Downloads watermark-free video from an allowlist of platforms (YouTube, Instagram, Facebook,
+TikTok, Douyin, Pinterest, Bilibili) and streams it back.
+
+- API: `GET /health` (public), `GET /metrics`, `GET /info?url=`, `POST /download`,
+  `POST /jobs` → `GET /jobs/{id}` → `/jobs/{id}/events` (SSE) → `/jobs/{id}/file`
+- Auth: HMAC-signed requests (`X-Video-*`); `/health` is unauthenticated
+- General platforms: `yt-dlp` trial matrix (plain → cookies → proxy → cookies+proxy), preferring
+  H.264 + AAC so the output plays in QuickTime/Safari/iOS
+- Douyin: `douyin-downloader` → `f2` → `yt-dlp`, then a typed error. No browser is launched
+- Cookies: Netscape jars read per request from `COOKIE_DIR`; managed by `video-worker/scripts/cookiectl`
+  (VPS) and `video-worker/scripts/export-brave-cookies.sh` (developer machine). Never commit jars.
+
 ## Project layout
 
 ```
-app/
-  main.py                 # FastAPI app, middleware wiring, lifespan
-  api/routes/             # health, voices, tts
-  core/                   # config, logging, security (HMAC), errors, middleware
-  schemas/                # request/response models
-  services/               # synthesis, engine_router, voice_catalog, chunking, storage
-tests/                    # pytest suite
-deploy/                   # docker-compose, Caddyfile, scripts, monitoring runbook
-.github/workflows/        # ci.yml, deploy.yml
+app/                      # TTS worker (FastAPI)
+  main.py                 #   app, middleware wiring, lifespan
+  api/routes/             #   health, voices, tts
+  core/                   #   config, logging, security (HMAC), errors, middleware
+  schemas/                #   request/response models
+  services/               #   synthesis, engine_router, voice_catalog, chunking, storage
+video-worker/             # Video download worker (FastAPI)
+  main.py                 #   app, routes, lifespan cleanup
+  downloader.py           #   orchestrator: direct media, Douyin chain, yt-dlp matrix
+  douyin.py               #   Douyin tiers + /info metadata
+  auth.py / security.py   #   HMAC middleware + verifier (X-Video-*)
+  cookies.py / platforms.py / errors.py / jobs.py
+  scripts/                #   cookiectl, cookie export, Douyin helpers
+  deploy/                 #   its own compose + cookie systemd timers
+tests/                    # pytest suite (TTS)
+deploy/                   # docker-compose (TTS), Caddyfile (both), scripts, monitoring runbook
+.github/workflows/        # ci.yml, deploy.yml, video-worker-image.yml
 ```

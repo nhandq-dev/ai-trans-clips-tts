@@ -1,0 +1,10 @@
+[Unit]
+Description=Video-worker cookie validation (every 2 days)
+
+[Timer]
+OnCalendar=*-*-01,03,05,07,09,11,13,15,17,19,21,23,25,27,29,31 03:30:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,7 +1,9 @@
-# Caddy terminates TLS for tts-api.aitransclips.com and proxies to the worker.
+# Caddy terminates TLS for tts-api.aitransclips.com and proxies to the workers.
 #
-# The worker is published only on loopback (127.0.0.1:8004), so Caddy (a host systemd
-# service) reaches it without exposing the container port publicly.
+# Both workers are published only on loopback (127.0.0.1:8004 / :8005), so Caddy (a
+# host systemd service) reaches them without exposing container ports publicly.
+# They share one hostname and are separated by path prefix; `handle_path` strips
+# the prefix before proxying, so each worker keeps its own unprefixed routes.
 #
 # Caddy issues and renews the certificate automatically and redirects HTTP -> HTTPS by
 # default for this hostname; no explicit redirect block is required.
@@ -13,10 +15,24 @@ tts-api.aitransclips.com {
 		max_size 2MB
 	}
 
-	reverse_proxy 127.0.0.1:8004 {
-		transport http {
-			dial_timeout 2s
-			response_header_timeout 90s
+	# Video download worker (loopback :8005). handle_path strips /video.
+	# Longer header timeout: a download can take minutes.
+	handle_path /video/* {
+		reverse_proxy 127.0.0.1:8005 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 600s
+			}
+		}
+	}
+
+	# Everything else → TTS worker (loopback :8004).
+	handle {
+		reverse_proxy 127.0.0.1:8004 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 90s
+			}
 		}
 	}
 

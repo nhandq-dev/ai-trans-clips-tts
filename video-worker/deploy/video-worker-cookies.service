@@ -1,0 +1,12 @@
+[Unit]
+Description=Validate video-worker cookies (detect expired / login-required)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=COOKIE_DIR=/opt/video-worker/data/cookies
+Environment=YTDLP_BIN=/usr/local/bin/yt-dlp
+EnvironmentFile=-/opt/video-worker/.env
+ExecStart=/opt/video-worker/scripts/cookiectl check
+ExecStartPost=/opt/video-worker/scripts/cookiectl prune 14
