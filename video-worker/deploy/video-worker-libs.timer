@@ -1,0 +1,10 @@
+[Unit]
+Description=Update video-worker libs every 2 days (yt-dlp, f2)
+
+[Timer]
+OnCalendar=*-*-01,03,05,07,09,11,13,15,17,19,21,23,25,27,29,31 04:00:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

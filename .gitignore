@@ -8,3 +8,9 @@ __pycache__/
 tts_output/
 samples/
 data/
+
+# video-worker
+video-worker/cookies/*.txt
+video-worker/cookies/incoming/
+video-worker/output/
+!video-worker/cookies/.gitkeep

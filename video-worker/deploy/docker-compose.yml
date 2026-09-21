@@ -1,0 +1,21 @@
+services:
+  video-worker:
+    image: ghcr.io/nhandq-dev/video-worker:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - '127.0.0.1:8005:8005'
+    volumes:
+      - ./data/output:/data/output
+      - ./data/cookies:/data/cookies
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:8005/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

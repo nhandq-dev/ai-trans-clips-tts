@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+#
+# cookiectl — manage the VPS cookie store for the video downloader.
+#
+# The worker reads cookies from COOKIE_DIR at request time, so installing a
+# new file takes effect immediately: no restart, no redeploy, no rebuild.
+#
+# Commands:
+#   cookiectl list                 show installed cookie files + freshness
+#   cookiectl install <name>       atomically install cookies/incoming/<name>.txt
+#   cookiectl install-all          install every *.txt in cookies/incoming/
+#   cookiectl set <name> <file>    install a local file directly (atomic)
+#   cookiectl check [name]         validate cookies with yt-dlp --simulate
+#   cookiectl prune [days]         warn on files older than N days (default 14)
+#   cookiectl platform-of <url>    print the platform key for a URL
+#   cookiectl paths                print cookie dir + check config
+#
+# Never prints cookie contents.
+
+set -euo pipefail
+
+COOKIE_DIR="${COOKIE_DIR:-/opt/video-worker/data/cookies}"
+STAGING_DIR="${COOKIE_DIR}/incoming"
+CHECKS_FILE="${COOKIE_CHECKS_FILE:-${COOKIE_DIR}/checks.conf}"
+YTDLP="${YTDLP_BIN:-yt-dlp}"
+ALERT_WEBHOOK="${COOKIE_ALERT_WEBHOOK:-}"
+STALE_DAYS="${COOKIE_STALE_DAYS:-14}"
+
+log() { printf '%s\n' "$*" >&2; }
+
+write_default_checks() {
+  [[ -f "$CHECKS_FILE" ]] && return 0
+  cat > "$CHECKS_FILE" <<'EOF'
+# name|probe-url  (a public URL used only to detect expired/login-required cookies)
+youtube|https://www.youtube.com/watch?v=aqz-KE-bpKQ
+instagram|https://www.instagram.com/reel/C8bXKqPPkYQ/
+facebook|https://www.facebook.com/watch/?v=10153231379946729
+tiktok|https://www.tiktok.com/@tiktok/video/7106594312292453675
+douyin|https://www.douyin.com/video/7150855886598470919
+pinterest|https://www.pinterest.com/pin/1129419901198325/
+EOF
+}
+
+platform_of() {
+  local url="$1"
+  case "$url" in
+    *youtube.com*|*youtu.be*|*youtube-nocookie.com*) echo youtube ;;
+    *instagram.com*) echo instagram ;;
+    *facebook.com*|*fb.watch*|*fbcdn.net*) echo facebook ;;
+    *tiktok.com*|*tiktokv.com*) echo tiktok ;;
+    *douyin.com*|*iesdouyin.com*) echo douyin ;;
+    *pinterest.com*|*pin.it*) echo pinterest ;;
+    *) echo "" ;;
+  esac
+}
+
+count_cookies() { grep -vc '^#' "$1" 2>/dev/null || echo 0; }
+
+cmd_list() {
+  [[ -d "$COOKIE_DIR" ]] || { log "no cookie dir at $COOKIE_DIR"; return 1; }
+  printf '%-12s %8s %6s  %s\n' NAME COOKIES AGE SOURCE
+  local f name cookies mtime age
+  for f in "$COOKIE_DIR"/*.txt; do
+    [[ -e "$f" ]] || continue
+    name="$(basename "$f" .txt)"
+    cookies="$(count_cookies "$f")"
+    mtime="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f")"
+    age="$(( ( $(date +%s) - mtime ) / 86400 ))d"
+    printf '%-12s %8s %6s  %s\n' "$name" "$cookies" "$age" "$f"
+  done
+  if [[ -d "$STAGING_DIR" ]] && compgen -G "$STAGING_DIR/*.txt" >/dev/null; then
+    log ""
+    log "pending in incoming/ (run: cookiectl install-all):"
+    ls -1 "$STAGING_DIR"/*.txt | xargs -n1 basename | sed 's/^/  /' >&2
+  fi
+}
+
+install_one() { # $1 = source path, $2 = name
+  local src="$1" name="$2" dest tmp
+  [[ -s "$src" ]] || { log "missing or empty: $src"; return 1; }
+  dest="${COOKIE_DIR}/${name}.txt"
+  tmp="${dest}.tmp.$$"
+  install -m 600 "$src" "$tmp"          # private perms, same filesystem
+  mv -f "$tmp" "$dest"                  # atomic swap
+  log "installed ${name}.txt ($(count_cookies "$dest") cookies)"
+}
+
+cmd_install() {
+  local name="${1:?usage: cookiectl install <name>}"
+  install_one "${STAGING_DIR}/${name}.txt" "$name"
+  rm -f "${STAGING_DIR}/${name}.txt"
+}
+
+cmd_install_all() {
+  local found=0 f name
+  mkdir -p "$STAGING_DIR"
+  for f in "$STAGING_DIR"/*.txt; do
+    [[ -e "$f" ]] || continue
+    name="$(basename "$f" .txt)"
+    install_one "$f" "$name" && rm -f "$f"
+    found=1
+  done
+  [[ "$found" == 1 ]] || log "nothing to install in $STAGING_DIR"
+}
+
+cmd_set() {
+  local name="${1:?usage: cookiectl set <name> <file>}" file="${2:?}"
+  install_one "$file" "$name"
+}
+
+cmd_check() {
+  command -v "$YTDLP" >/dev/null 2>&1 || { log "yt-dlp not found"; return 1; }
+  write_default_checks
+  local want="${1:-}" name url file rc failed=0 checked=0
+  while IFS='|' read -r name url; do
+    [[ -z "${name:-}" || "$name" == \#* ]] && continue
+    [[ -n "$want" && "$name" != "$want" ]] && continue
+    file="${COOKIE_DIR}/${name}.txt"
+    [[ -f "$file" ]] || { log "skip ${name}: no cookie file"; continue; }
+    checked=$((checked + 1))
+    rc=0
+    out="$("$YTDLP" --cookies "$file" --simulate --skip-download \
+      --no-warnings --ignore-config "$url" 2>&1)" || rc=$?
+    if [[ "$rc" -ne 0 ]] && grep -qiE 'sign in|login required|cookies|not a bot|account' <<< "$out"; then
+      log "STALE  ${name}: login/cookie error"
+      failed=$((failed + 1))
+    elif [[ "$rc" -eq 0 ]]; then
+      log "OK     ${name}"
+    else
+      log "WARN   ${name}: probe failed for another reason (rc=$rc)"
+    fi
+  done < "$CHECKS_FILE"
+
+  if [[ "$failed" -gt 0 && -n "$ALERT_WEBHOOK" ]]; then
+    curl -fsS -m 10 -X POST "$ALERT_WEBHOOK" \
+      -H 'Content-Type: application/json' \
+      -d "{\"event\":\"cookies_stale\",\"count\":${failed},\"checked\":${checked}}" \
+      >/dev/null 2>&1 || log "alert webhook failed"
+  fi
+  [[ "$failed" -eq 0 ]]
+}
+
+cmd_prune() {
+  local days="${1:-$STALE_DAYS}" f name mtime age
+  for f in "$COOKIE_DIR"/*.txt; do
+    [[ -e "$f" ]] || continue
+    name="$(basename "$f" .txt)"
+    mtime="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f")"
+    age="$(( ( $(date +%s) - mtime ) / 86400 ))"
+    if [[ "$age" -gt "$days" ]]; then
+      log "STALE ${name}.txt is ${age}d old (limit ${days}d) — re-run export-brave-cookies.sh"
+    fi
+  done
+}
+
+cmd_paths() {
+  echo "cookie_dir=${COOKIE_DIR}"
+  echo "staging_dir=${STAGING_DIR}"
+  echo "checks_file=${CHECKS_FILE}"
+  echo "ytdlp=${YTDLP}"
+  echo "alert_webhook=${ALERT_WEBHOOK:-<unset>}"
+}
+
+case "${1:-}" in
+  list)        cmd_list ;;
+  install)     shift; cmd_install "$@" ;;
+  install-all) cmd_install_all ;;
+  set)         shift; cmd_set "$@" ;;
+  check)       shift; cmd_check "${1:-}" ;;
+  prune)       shift; cmd_prune "${1:-}" ;;
+  platform-of) shift; platform_of "${1:?usage: cookiectl platform-of <url>}" ;;
+  paths)       cmd_paths ;;
+  *) awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 2 ;;
+esac

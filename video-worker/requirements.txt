@@ -1,0 +1,18 @@
+# video-worker — download only (no ML, no torch, no render stack).
+# Python 3.10+ runtime. After install: `playwright install chromium`.
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.0.0
+python-multipart>=0.0.12
+python-dotenv>=1.0.0
+
+httpx>=0.28.0
+yt-dlp>=2024.12.0
+playwright>=1.40.0
+
+# Douyin (a_bogus signing) is installed separately:
+#   pip install -r requirements-douyin.txt
+#   pip install --no-deps 'f2>=0.0.1'
+# `f2` pins httpx to 0.25/0.27, which conflicts with the web stack above, so it
+# must be installed with --no-deps (it works fine against httpx>=0.28).

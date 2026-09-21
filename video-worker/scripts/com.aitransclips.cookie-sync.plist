@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Cookie sync every 2 days from this Mac (Brave) to the VPS.
+
+  Install:
+    cp video-worker/scripts/com.aitransclips.cookie-sync.plist \
+       ~/Library/LaunchAgents/
+    launchctl unload ~/Library/LaunchAgents/com.aitransclips.cookie-sync.plist 2>/dev/null || true
+    launchctl load  ~/Library/LaunchAgents/com.aitransclips.cookie-sync.plist
+    # If you had the daily version loaded before, unload and reload to pick up the new interval.
+
+  Run now / inspect:
+    launchctl start com.aitransclips.cookie-sync
+    tail -f /tmp/cookie-sync.log /tmp/cookie-sync.err
+
+  Remove:
+    launchctl unload ~/Library/LaunchAgents/com.aitransclips.cookie-sync.plist
+
+  NOTE: the job needs Full Disk Access to read Brave's cookie DB. Grant it to
+  /bin/bash (or the launched process) under
+  System Settings > Privacy & Security > Full Disk Access.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aitransclips.cookie-sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/diepquangnghia/Desktop/ai-trans-clips-2/video-worker/scripts/export-brave-cookies.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>COOKIE_BROWSER</key>
+    <string>brave</string>
+    <key>VPS_HOST</key>
+    <string>root@103.116.104.223</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>172800</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/cookie-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/cookie-sync.err</string>
+</dict>
+</plist>
