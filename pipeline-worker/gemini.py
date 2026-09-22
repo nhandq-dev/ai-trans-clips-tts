@@ -50,10 +50,11 @@ def _prompt(source_language: str, target_language: str) -> str:
         f"{src} Target language is '{target_language}'.\n"
         "Listen to the audio and return a JSON object with:\n"
         "- detected_language: the source language code (e.g. en, vi, zh)\n"
-        "- segments: list of {start, end, source_text, target_text} where start/end are seconds (float), "
-        "source_text is the verbatim transcript in the source language, target_text is the translation in the target language.\n"
-        "Rules: sort segments by start time, merge very short segments (<0.4s) into neighbours, drop empty segments. "
-        "If the audio is silent or has no speech, return detected_language='unknown' and segments=[]."
+        "- segments: list of {start, end, source_text, target_text} where\n"
+        "  start/end are seconds (float), source_text is verbatim transcript\n"
+        "  in the source language, target_text is translation in target language.\n"
+        "Rules: sort by start, drop empty, do not hallucinate. "
+        "If silent/no speech, return detected_language='unknown' and segments=[]."
     )
 
 
@@ -166,11 +167,10 @@ async def transcribe_and_translate(
                 "gemini call model=%s source=%s target=%s", model, source_language, target_language
             )
             result = await _call_once(client, model, audio_bytes, prompt)
-            # Basic post-processing: sort + drop empty
-            result.segments = sorted(result.segments, key=lambda s: s.start)
-            result.segments = [
-                s for s in result.segments if s.source_text.strip() and s.target_text.strip()
-            ]
+            # Post-processing: sort, drop empty, merge <0.4s (plan/009 T1.2)
+            from segments import normalize_segments
+
+            result.segments = normalize_segments(result.segments)
             logger.info("gemini success model=%s segments=%d", model, len(result.segments))
             return result
         except PermanentError as exc:
