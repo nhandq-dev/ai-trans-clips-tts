@@ -174,53 +174,59 @@ async def metrics():
 
 
 async def _process_job(job_id: str, request: TranslateRequest, request_id: str | None) -> None:
-    """Orchestrate stages. Stub for T0.2 — transitions queued → done without real work.
-
-    T1.x will replace this with: download → extract → gemini → TTS → mux.
-    Resume (§4.5) checks stage_state/artifacts before each stage.
-    """
+    """Orchestrate stages via pipeline.py (T2.4) with resume and metrics."""
     start = time.time()
     _metrics["requests"] += 1
     try:
-        await job_store.update_job(job_id, status="processing", stage="downloading", progress=5)
-
         async with _semaphore:
-            # TODO T1.1: probe + extract audio
-            await job_store.update_job(
-                job_id, stage="downloading", progress=10, stage_state={"downloading": "done"}
-            )
-            await asyncio.sleep(0.05)
+            # Support local file for E2E tests: if source_url is a local path, copy it
+            # into the job's work dir before calling the real pipeline. The pipeline
+            # itself also handles source_key (S3) and would handle source_url via
+            # video-worker for production — we just ensure a local file works.
+            if request.source_url and Path(request.source_url).exists():
+                # create work dir early and copy
+                work = WORK_DIR / job_id
+                work.mkdir(parents=True, exist_ok=True)
+                dst = work / "source.mp4"
+                if not dst.exists():
+                    import shutil
 
-            # TODO T1.2: gemini transcribe+translate
-            if not GEMINI_API_KEY:
-                raise RuntimeError("GEMINI_NOT_CONFIGURED")
-            await job_store.update_job(
-                job_id,
-                stage="transcribing",
-                progress=30,
-                stage_state={"downloading": "done", "transcribing": "done"},
-            )
-            await asyncio.sleep(0.05)
+                    shutil.copy2(request.source_url, dst)
+                # trick pipeline into skipping download: mark downloading done
+                await job_store.update_job(job_id, stage_state={"downloading": "done"})
+            # also support file:// URLs
+            elif request.source_url and request.source_url.startswith("file://"):
+                p = Path(request.source_url[7:])
+                if p.exists():
+                    work = WORK_DIR / job_id
+                    work.mkdir(parents=True, exist_ok=True)
+                    dst = work / "source.mp4"
+                    if not dst.exists():
+                        import shutil
 
-            # TODO T2.x: TTS + mux
-            await job_store.update_job(job_id, stage="muxing", progress=90)
-            await asyncio.sleep(0.05)
+                        shutil.copy2(p, dst)
+                    await job_store.update_job(job_id, stage_state={"downloading": "done"})
+            import pipeline as pipeline_mod
 
-        await job_store.update_job(
-            job_id,
-            status="completed",
-            stage="done",
-            progress=100,
-            stage_state={"downloading": "done", "transcribing": "done", "muxing": "done"},
-        )
-        _metrics["success"] += 1
+            await pipeline_mod.run_pipeline(job_id)
+        job = await job_store.get_job(job_id)
+        if job and job.status == "completed":
+            _metrics["success"] += 1
+        else:
+            _metrics["failed"] += 1
+            code = (job.error or {}).get("code", "FAILED") if job else "FAILED"
+            _metrics["by_code"][code] = _metrics["by_code"].get(code, 0) + 1
     except Exception as exc:
-        code = str(exc) if "GEMINI" in str(exc) or "DOWNLOAD" in str(exc) else "FAILED"
         _metrics["failed"] += 1
+        code = getattr(exc, "code", "FAILED") if hasattr(exc, "code") else "FAILED"
+        if isinstance(exc, str):
+            code = exc
         _metrics["by_code"][code] = _metrics["by_code"].get(code, 0) + 1
-        await job_store.update_job(
-            job_id, status="failed", progress=100, error={"code": code, "message": str(exc)}
-        )
+        # run_pipeline already set job to failed, but ensure
+        try:
+            await job_store.update_job(job_id, status="failed", error={"code": code, "message": str(exc)})
+        except Exception:
+            pass
     finally:
         _metrics["total_duration"] += time.time() - start
 
