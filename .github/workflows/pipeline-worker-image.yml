@@ -1,0 +1,51 @@
+name: Build pipeline-worker image
+
+# The pipeline worker orchestrates download → Gemini → TTS → mux on the VPS,
+# so it ships as its own Docker image. Path-filtered so a change to app/ (TTS)
+# or video-worker does not rebuild it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pipeline-worker/**'
+      - '.github/workflows/pipeline-worker-image.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: pipeline-worker-image
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/nhandq-dev/pipeline-worker
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: pipeline-worker
+          file: pipeline-worker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

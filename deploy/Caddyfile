@@ -26,6 +26,16 @@ tts-api.aitransclips.com {
 		}
 	}
 
+	# Translation pipeline worker (loopback :8006). handle_path strips /translate.
+	handle_path /translate/* {
+		reverse_proxy 127.0.0.1:8006 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 600s
+			}
+		}
+	}
+
 	# Everything else → TTS worker (loopback :8004).
 	handle {
 		reverse_proxy 127.0.0.1:8004 {
