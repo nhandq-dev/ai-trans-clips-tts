@@ -1,0 +1,22 @@
+services:
+  pipeline-worker:
+    image: ghcr.io/nhandq-dev/pipeline-worker:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - '127.0.0.1:8006:8006'
+    volumes:
+      - ./data/pipeline-output:/data/pipeline-output
+      - ./data/pipeline-cache:/data/pipeline-cache
+      - ./data/pipeline-tmp:/tmp/pipeline
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:8006/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

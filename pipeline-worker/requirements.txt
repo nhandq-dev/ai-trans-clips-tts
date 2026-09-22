@@ -1,0 +1,25 @@
+# pipeline-worker — translation pipeline (download → Gemini → TTS → subtitle → mux)
+# Python 3.10+ runtime.
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+httpx>=0.28.0
+
+# Gemini structured output
+google-genai>=0.3.0
+
+# Resilience (plan/009 T2.5)
+tenacity>=9.0.0
+pybreaker>=1.4.0
+
+# Object storage (plan/009 T0.4) — S3-compatible (AWS S3 / Cloudflare R2)
+boto3>=1.35.0
+
+# Media
+srt>=3.5.0
+numpy>=1.26.0
+opencv-python-headless>=4.10.0
+
+# Audio/subtitle — srt already above, no extra

@@ -29,11 +29,19 @@ from downloader import download
 from errors import DownloadError, classify
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from platforms import platform_of, validate_url
 from pydantic import BaseModel, Field
 from security import parse_keys
 from starlette.background import BackgroundTask
+
+try:
+    import storage as s3_storage
+
+    _S3_ENABLED = bool(os.getenv("S3_BUCKET") and os.getenv("S3_ACCESS_KEY_ID"))
+except Exception:  # storage not installed
+    s3_storage = None  # type: ignore
+    _S3_ENABLED = False
 
 # Docker passes config through compose's env_file; running uvicorn directly
 # (local dev) needs the .env loaded explicitly. Existing environment variables
@@ -287,6 +295,28 @@ async def _process_job(job_id: str, url: str) -> None:
     try:
         async with _semaphore:
             result = await download(url, job_id)
+        # T0.4: upload to object storage when configured, so Vercel can redirect (bypass 4.5MB limit)
+        s3_key = None
+        if _S3_ENABLED and s3_storage and not result.from_cache and result.path.exists():
+            try:
+                key = f"results/video/{job_id}/{result.filename or result.path.name}"
+                s3_key = await asyncio.to_thread(
+                    s3_storage.upload_file, result.path, key, "video/mp4"
+                )
+                logger.info("uploaded to s3 key=%s size=%d", s3_key, result.path.stat().st_size)
+            except Exception as exc:
+                logger.warning("s3 upload failed, falling back to local file: %s", exc)
+                s3_key = None
+        elif _S3_ENABLED and result.from_cache and result.path.exists():
+            # cache files are shared — still upload for presigned access if not yet in s3
+            try:
+                key = f"cache/video/{result.path.name}"
+                if not await asyncio.to_thread(s3_storage.exists, key):  # type: ignore[union-attr]
+                    await asyncio.to_thread(s3_storage.upload_file, result.path, key, "video/mp4")
+                s3_key = key
+                logger.info("s3 cache key=%s", s3_key)
+            except Exception as exc:
+                logger.warning("s3 cache upload failed: %s", exc)
         await job_store.update_job(
             job_id,
             status="completed",
@@ -295,6 +325,7 @@ async def _process_job(job_id: str, url: str) -> None:
             file_name=result.filename,
             file_size=result.path.stat().st_size if result.path.exists() else None,
             from_cache=result.from_cache,
+            s3_key=s3_key,
         )
         _metrics["success"] += 1
         _metrics["total_duration"] += time.time() - start
@@ -342,12 +373,22 @@ async def get_job_status(job_id: str):
 @app.get("/jobs/{job_id}/file")
 async def get_job_file(job_id: str):
     job = await job_store.get_job(job_id)
-    if not job or job.status != "completed" or not job.file_path:
+    if not job or job.status != "completed":
+        raise HTTPException(status_code=404, detail="File not ready")
+    # T0.4: if object storage is enabled and we have a key, redirect to presigned URL
+    # so the download bypasses Vercel (4.5MB limit). The API will also use this.
+    if _S3_ENABLED and s3_storage and getattr(job, "s3_key", None):
+        try:
+            url = await asyncio.to_thread(s3_storage.presign_get, job.s3_key)  # type: ignore[union-attr]
+            return RedirectResponse(url=url, status_code=302)
+        except Exception as exc:
+            logger.warning("presign failed key=%s: %s", job.s3_key, exc)
+    # Fallback: stream from local disk (dev or when S3 not configured)
+    if not job.file_path:
         raise HTTPException(status_code=404, detail="File not ready")
     path = Path(job.file_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
-    # Cache files are shared across requests — never delete them on stream.
     background = None if job.from_cache else BackgroundTask(_cleanup, path)
     return FileResponse(
         path=str(path),
@@ -355,6 +396,23 @@ async def get_job_file(job_id: str):
         filename=job.file_name or path.name,
         background=background,
     )
+
+
+@app.get("/jobs/{job_id}/presign")
+async def get_job_presign(job_id: str):
+    """Worker signs the URL itself (plan/009 §5.1) — the API just forwards it."""
+    job = await job_store.get_job(job_id)
+    if not job or job.status != "completed" or not getattr(job, "s3_key", None):
+        raise HTTPException(status_code=404, detail="File not ready or not in object storage")
+    try:
+        url = await asyncio.to_thread(s3_storage.presign_get, job.s3_key)  # type: ignore[union-attr]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "url": url,
+        "key": job.s3_key,
+        "expires_in": int(os.getenv("PRESIGN_TTL_SECONDS", "900")),
+    }
 
 
 @app.get("/jobs/{job_id}/events")

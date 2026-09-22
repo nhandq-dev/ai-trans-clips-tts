@@ -1,11 +1,16 @@
-"""Async job store for the video worker.
+"""Async job store for the pipeline worker.
 
-Jobs are in-memory with TTL. The VPS runs a single worker instance, so an
-in-memory store is sufficient and avoids a DB dependency. The API (Vercel,
-stateless) proxies to the worker — it never stores jobs itself.
+In-memory with TTL. Mirrors the video-worker's store (``video-worker/jobs.py``)
+so the VPS can run a single worker instance without a DB dependency. The API
+(Vercel, stateless) only proxies — it never stores pipeline state.
 
-Lifecycle: queued -> processing -> completed | failed
-Files are kept for JOB_FILE_TTL_SECONDS after completion, then cleaned.
+Stages (see plan/009 §4.2):
+    downloading → extracting → transcribing → detecting_subs → synthesizing
+    → aligning → muxing → done
+
+Resume is stage-level (§4.5): each stage writes its artifacts atomically
+(.tmp → mv) before marking itself done in ``stage_state``. The orchestrator
+skips stages whose artifacts already exist.
 """
 
 from __future__ import annotations
@@ -17,25 +22,59 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-JobStatus = Literal["queued", "processing", "completed", "failed"]
+JobStatus = Literal["queued", "processing", "completed", "failed", "canceled"]
+Stage = Literal[
+    "queued",
+    "downloading",
+    "extracting",
+    "transcribing",
+    "detecting_subs",
+    "synthesizing",
+    "aligning",
+    "muxing",
+    "done",
+]
 
 JOB_TTL_SECONDS = 3600  # keep job record for 1h
-JOB_FILE_TTL_SECONDS = 3600  # keep output file for 1h
+JOB_FILE_TTL_SECONDS = 3600  # keep output files for 1h
+
+STAGE_ORDER: list[Stage] = [
+    "queued",
+    "downloading",
+    "extracting",
+    "transcribing",
+    "detecting_subs",
+    "synthesizing",
+    "aligning",
+    "muxing",
+    "done",
+]
 
 
 @dataclass
 class Job:
     job_id: str
-    url: str
+    # input
+    source_url: str | None = None
+    source_key: str | None = None
+    source_language: str = "auto"
+    target_language: str = "vi"
+    voice: str | None = None
+    options: dict = field(default_factory=dict)
+    idempotency_key: str | None = None
+    user_id: str | None = None
+    # progress
     status: JobStatus = "queued"
-    platform: str | None = None
+    stage: Stage = "queued"
+    stage_state: dict = field(default_factory=dict)  # stage -> done/partial
     progress: int = 0  # 0-100, for SSE
     error: dict | None = None  # {code, message}
-    file_path: str | None = None  # absolute path when completed (local scratch)
+    # artifacts (object keys after upload, local paths before)
+    artifacts: dict | None = None  # {video:{key,size}, markdown:{key,size}, ...}
+    file_path: str | None = None  # absolute local path when completed (pre-upload)
     file_name: str | None = None
     file_size: int | None = None
-    from_cache: bool = False  # cache files must not be deleted after streaming
-    s3_key: str | None = None  # object storage key when uploaded (T0.4)
+    request_id: str | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -55,19 +94,51 @@ def _now() -> float:
     return time.time()
 
 
-async def create_job(url: str, platform: str | None, job_id: str | None = None) -> Job:
+async def create_job(
+    *,
+    source_url: str | None = None,
+    source_key: str | None = None,
+    source_language: str = "auto",
+    target_language: str = "vi",
+    voice: str | None = None,
+    options: dict | None = None,
+    idempotency_key: str | None = None,
+    user_id: str | None = None,
+    request_id: str | None = None,
+    job_id: str | None = None,
+) -> Job:
     jid = (job_id or uuid.uuid4().hex)[:64]
-    job = Job(job_id=jid, url=url, platform=platform)
+    job = Job(
+        job_id=jid,
+        source_url=source_url,
+        source_key=source_key,
+        source_language=source_language,
+        target_language=target_language,
+        voice=voice,
+        options=options or {},
+        idempotency_key=idempotency_key,
+        user_id=user_id,
+        request_id=request_id,
+    )
     async with _lock:
         _jobs[jid] = job
         _listeners[jid] = []
     return job
 
 
+async def find_by_idempotency_key(user_id: str | None, idempotency_key: str) -> Job | None:
+    """Return a non-terminal job matching the idempotency key, if any."""
+    async with _lock:
+        for job in _jobs.values():
+            if job.idempotency_key == idempotency_key and job.user_id == user_id:
+                if job.status in ("queued", "processing", "completed"):
+                    return job
+        return None
+
+
 async def get_job(job_id: str) -> Job | None:
     async with _lock:
         job = _jobs.get(job_id)
-        # lazy expire
         if job and _now() - job.updated_at > JOB_TTL_SECONDS:
             await _remove_job(job_id)
             return None
@@ -76,7 +147,6 @@ async def get_job(job_id: str) -> Job | None:
 
 async def list_jobs(limit: int = 100) -> list[Job]:
     async with _lock:
-        # expire stale
         stale = [jid for jid, j in _jobs.items() if _now() - j.updated_at > JOB_TTL_SECONDS]
         for jid in stale:
             await _remove_job(jid)
@@ -101,7 +171,6 @@ async def update_job(job_id: str, **fields) -> Job | None:
         for k, v in fields.items():
             setattr(job, k, v)
         job.updated_at = _now()
-        # notify SSE listeners
         for q in _listeners.get(job_id, []):
             try:
                 q.put_nowait(job.to_dict())
@@ -133,4 +202,3 @@ async def cleanup_expired_files(output_dir: Path) -> None:
                     p.unlink(missing_ok=True)
             except Exception:
                 pass
-    # also clean cache is handled in downloader._find_cached
