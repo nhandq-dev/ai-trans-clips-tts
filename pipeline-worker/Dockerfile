@@ -1,5 +1,8 @@
 # pipeline-worker — translation pipeline (download → Gemini → TTS → subtitle → mux)
-FROM python:3.10-slim
+# 3.12 to match pyproject.toml (requires-python >=3.12, ruff target py312) and local dev.
+# On <3.11 `asyncio.wait_for` raises asyncio.TimeoutError, which is NOT the builtin
+# TimeoutError — a mismatch that once killed the scheduler silently.
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

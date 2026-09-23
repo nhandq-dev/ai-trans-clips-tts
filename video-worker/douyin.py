@@ -175,7 +175,7 @@ async def _run_script(script: Path, args: list[str], output_path: Path, timeout:
         )
         try:
             await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except TimeoutError:
+        except asyncio.TimeoutError:  # noqa: UP041 - this image runs Python 3.10
             proc.kill()
             output_path.unlink(missing_ok=True)
             return False

@@ -146,7 +146,7 @@ async def _probe_info(url: str) -> dict:
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=INFO_TIMEOUT)
-    except TimeoutError as exc:
+    except asyncio.TimeoutError as exc:  # noqa: UP041 - this image runs Python 3.10
         proc.kill()
         raise DownloadError("TIMEOUT") from exc
     if proc.returncode != 0:
@@ -510,7 +510,7 @@ async def job_events(job_id: str):
                     yield f"data: {json.dumps(data)}\n\n"
                     if data.get("status") in ("completed", "failed"):
                         break
-                except TimeoutError:
+                except asyncio.TimeoutError:  # noqa: UP041 - this image runs Python 3.10
                     yield ": keepalive\n\n"
         finally:
             job_store.remove_listener(job_id, q)

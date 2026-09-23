@@ -46,7 +46,24 @@ class Scheduler:
 
     async def start(self) -> None:
         self._stop.clear()
-        self._loop_task = asyncio.create_task(self._dispatch_loop())
+        self._loop_task = asyncio.create_task(self._supervise())
+
+    async def _supervise(self) -> None:
+        """Keep the dispatcher alive.
+
+        A crash in the loop used to kill the scheduler silently: the worker stayed
+        healthy while every job sat in `queued` forever. Supervising means a
+        transient (or unexpected) failure costs one poll interval, not the worker.
+        """
+        while not self._stop.is_set():
+            try:
+                await self._dispatch_loop()
+                return  # clean exit (stop() was called)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("scheduler loop crashed, restarting: %s", exc)
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     async def stop(self) -> None:
         self._stop.set()
@@ -63,6 +80,20 @@ class Scheduler:
     @property
     def running_count(self) -> int:
         return len(self._tasks)
+
+    @property
+    def alive(self) -> bool:
+        """True while the supervising task is running."""
+        return self._loop_task is not None and not self._loop_task.done()
+
+    def snapshot(self) -> dict:
+        return {
+            "alive": self.alive,
+            "running": self.running_count,
+            "concurrency": self._concurrency,
+            "max_per_user": self._max_per_user,
+            "running_per_user": dict(self._running_per_user),
+        }
 
     async def _dispatch_loop(self) -> None:
         while not self._stop.is_set():

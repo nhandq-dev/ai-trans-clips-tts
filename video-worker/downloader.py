@@ -137,7 +137,7 @@ async def _run_ytdlp(args: list[str]) -> tuple[int, str]:
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=YTDLP_TIMEOUT)
-    except TimeoutError:
+    except asyncio.TimeoutError:  # noqa: UP041 - this image runs Python 3.10
         proc.kill()
         return 1, "timed out"
     text = (

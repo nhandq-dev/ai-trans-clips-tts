@@ -66,3 +66,47 @@ def test_respects_per_user_concurrency():
     assert b1.job_id in running
     assert len(running) == 2
     assert a1.job_id in running or a2.job_id in running
+
+
+def test_dispatch_loop_survives_the_poll_timeout(monkeypatch):
+    """Regression: the loop used to die on the first idle poll.
+
+    On Python < 3.11 ``asyncio.wait_for`` raises ``asyncio.TimeoutError``, which is
+    NOT the builtin ``TimeoutError``. Catching the builtin let the exception escape
+    ``_dispatch_loop`` and kill the scheduler silently: the worker stayed healthy
+    while every job sat in ``queued`` forever.
+    """
+    import contextlib
+
+    import scheduler as scheduler_module
+    from scheduler import Scheduler
+
+    monkeypatch.setattr(scheduler_module, "POLL_INTERVAL_SECONDS", 0.01)
+
+    async def scenario():
+        started: list[str] = []
+
+        async def runner(job_id: str) -> None:
+            started.append(job_id)
+
+        sched = Scheduler(runner, concurrency=5, max_concurrent_per_user=5)
+        loop = asyncio.create_task(sched._dispatch_loop())
+
+        # Idle for a few poll cycles first: this is where the old code crashed.
+        await asyncio.sleep(0.05)
+        assert not loop.done(), "dispatch loop died on an idle poll"
+
+        job = await jobs.create_job(source_url="http://x/1")
+        for _ in range(50):
+            if started:
+                break
+            await asyncio.sleep(0.02)
+
+        sched._stop.set()
+        loop.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await loop
+        return started, job.job_id
+
+    started, job_id = asyncio.run(scenario())
+    assert job_id in started, "queued job was never dispatched after the loop survived"

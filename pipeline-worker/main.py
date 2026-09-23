@@ -71,15 +71,20 @@ _metrics: dict[str, Any] = {
 async def lifespan(_app: FastAPI):
     cleanup_task = asyncio.create_task(_cleanup_loop())
     disk_task = asyncio.create_task(_disk_guard_loop())
+    watchdog_task = asyncio.create_task(_watchdog_loop())
     scheduler = get_scheduler(_process_job)
     await scheduler.start()
+    logger.info(
+        "scheduler started",
+        extra={"concurrency": scheduler.snapshot()["concurrency"]},
+    )
     try:
         yield
     finally:
         await scheduler.stop()
-        cleanup_task.cancel()
-        disk_task.cancel()
-        for task in (cleanup_task, disk_task):
+        for task in (cleanup_task, disk_task, watchdog_task):
+            task.cancel()
+        for task in (cleanup_task, disk_task, watchdog_task):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
@@ -109,6 +114,77 @@ async def _cleanup_work_dirs() -> None:
                 logger.info("removed expired work dir %s", child.name)
         except Exception:
             continue
+
+
+async def _watchdog_loop() -> None:
+    """Fail jobs that would otherwise sit in `queued`/`processing` forever.
+
+    Silent stalls are the worst failure mode: the UI shows a never-ending spinner
+    and the user has no idea what is wrong. This loop converts every stall into an
+    explicit, actionable error code.
+
+    * scheduler not alive  -> `SCHEDULER_DOWN` (the worker will never start jobs)
+    * queued too long      -> `QUEUE_TIMEOUT`
+    * processing too long  -> `JOB_TIMEOUT`
+    """
+    interval = int(os.getenv("WATCHDOG_INTERVAL_SECONDS", "15"))
+    queue_timeout = int(os.getenv("QUEUE_TIMEOUT_SECONDS", "900"))
+    job_timeout = int(os.getenv("JOB_TIMEOUT_SECONDS", "1800"))
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await _reap_stalled_jobs(queue_timeout, job_timeout)
+        except Exception as exc:  # never let the watchdog die
+            logger.warning("watchdog failed: %s", exc)
+
+
+async def _reap_stalled_jobs(queue_timeout: int, job_timeout: int) -> None:
+    now = time.time()
+    scheduler_alive = True
+    try:
+        scheduler_alive = get_scheduler().alive
+    except Exception:
+        scheduler_alive = False
+
+    for job in await job_store.list_jobs(limit=500):
+        if job.status == "queued":
+            waited = now - job.created_at
+            if not scheduler_alive:
+                await _fail_stalled(
+                    job.job_id,
+                    "SCHEDULER_DOWN",
+                    "The worker's job scheduler is not running, so this job was never "
+                    "started. This is a server-side fault — please retry.",
+                )
+            elif waited > queue_timeout:
+                await _fail_stalled(
+                    job.job_id,
+                    "QUEUE_TIMEOUT",
+                    f"Job stayed queued for {int(waited)}s (limit {queue_timeout}s) and was "
+                    "never started. The worker may be overloaded or stuck.",
+                )
+        elif job.status == "processing":
+            idle = now - job.updated_at
+            if idle > job_timeout:
+                await _fail_stalled(
+                    job.job_id,
+                    "JOB_TIMEOUT",
+                    f"Job made no progress for {int(idle)}s (limit {job_timeout}s) and was "
+                    "aborted.",
+                )
+
+
+async def _fail_stalled(job_id: str, code: str, message: str) -> None:
+    logger.error("failing stalled job %s: %s - %s", job_id, code, message)
+    await job_store.update_job(
+        job_id,
+        status="failed",
+        progress=100,
+        error={"code": code, "message": message},
+    )
+    _metrics["failed"] += 1
+    _metrics["by_code"][code] = _metrics["by_code"].get(code, 0) + 1
 
 
 async def _disk_guard_loop() -> None:
@@ -197,12 +273,20 @@ def _canonical_idempotency_key(req: TranslateRequest, user_id: str | None) -> st
 
 @app.get("/health")
 async def health():
+    # `scheduler.alive` being false is the failure mode where the worker answers
+    # health checks while every job stays queued forever — surface it loudly.
+    try:
+        scheduler_state = get_scheduler().snapshot()
+    except Exception:
+        scheduler_state = {"alive": False, "reason": "not initialised"}
+    healthy = scheduler_state.get("alive", False)
     return {
-        "status": "ok",
+        "status": "ok" if healthy else "degraded",
         "concurrency": CONCURRENCY,
         "work_dir": str(WORK_DIR),
         "signing_configured": bool(parse_keys(HMAC_KEYS_JSON)),
         "gemini_configured": bool(GEMINI_API_KEY),
+        "scheduler": scheduler_state,
     }
 
 

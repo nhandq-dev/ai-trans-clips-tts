@@ -82,7 +82,7 @@ async def refresh_douyin_cookies(timeout: int = 90) -> str:
         )
         try:
             await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except TimeoutError:
+        except asyncio.TimeoutError:  # noqa: UP041 - this image runs Python 3.10
             proc.kill()
             return ""
     except Exception:

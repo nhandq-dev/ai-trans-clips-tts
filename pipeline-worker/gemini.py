@@ -58,11 +58,25 @@ def _prompt(source_language: str, target_language: str) -> str:
     )
 
 
+#: Exhausted quota is not worth retrying: a per-day/per-project limit will not
+#: recover within the job's lifetime, and retrying burns the remaining budget of
+#: the fallback models too.
+_QUOTA_MARKERS = ("quota", "resource_exhausted", "billing", "exceeded your current")
+
+
 def _classify_genai_error(exc: Exception) -> type[TransientError] | type[PermanentError]:
-    """Map genai SDK errors to transient/permanent for tenacity."""
+    """Map genai SDK errors to transient/permanent for tenacity.
+
+    Permanent errors fail immediately with a precise code; only genuinely
+    retryable conditions (per-minute rate limits, 5xx, timeouts) are retried.
+    """
     msg = str(exc).lower()
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    # 429 rate limit, 503 high demand, timeout, 500 are transient
+
+    # Quota / billing: a 429 that will not clear within this job's lifetime.
+    if any(marker in msg for marker in _QUOTA_MARKERS):
+        return PermanentError
+    # Rate limit, high demand, timeout, 5xx are transient.
     if status in (429, 500, 502, 503, 504) or any(
         s in msg
         for s in ("503", "429", "unavailable", "high demand", "rate limit", "timeout", "deadline")
@@ -215,7 +229,13 @@ async def transcribe_and_translate(
             last_exc = TransientError(GEMINI_FAILED, str(exc))
             continue
 
-    raise TransientError(GEMINI_FAILED, f"all gemini models failed: {last_exc}")
+    # Preserve the cause's class: a permanent failure (quota/billing/invalid
+    # request) must not be reported as retryable, or the API would keep the job
+    # alive and the UI would sit in `transcribing` with no explanation.
+    detail = getattr(last_exc, "message", None) or str(last_exc)
+    if isinstance(last_exc, PermanentError):
+        raise PermanentError(GEMINI_FAILED, f"gemini failed: {detail}") from last_exc
+    raise TransientError(GEMINI_FAILED, f"all gemini models failed: {detail}") from last_exc
 
 
 # Sync wrapper for tests / scripts
