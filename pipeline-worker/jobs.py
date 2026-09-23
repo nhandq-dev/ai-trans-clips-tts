@@ -63,6 +63,7 @@ class Job:
     options: dict = field(default_factory=dict)
     idempotency_key: str | None = None
     user_id: str | None = None
+    priority: int = 0
     # progress
     status: JobStatus = "queued"
     stage: Stage = "queued"
@@ -71,6 +72,8 @@ class Job:
     error: dict | None = None  # {code, message}
     # artifacts (object keys after upload, local paths before)
     artifacts: dict | None = None  # {video:{key,size}, markdown:{key,size}, ...}
+    duration_seconds: int | None = None
+    segments_count: int | None = None
     file_path: str | None = None  # absolute local path when completed (pre-upload)
     file_name: str | None = None
     file_size: int | None = None
@@ -104,6 +107,7 @@ async def create_job(
     options: dict | None = None,
     idempotency_key: str | None = None,
     user_id: str | None = None,
+    priority: int = 0,
     request_id: str | None = None,
     job_id: str | None = None,
 ) -> Job:
@@ -116,6 +120,7 @@ async def create_job(
         target_language=target_language,
         voice=voice,
         options=options or {},
+        priority=priority,
         idempotency_key=idempotency_key,
         user_id=user_id,
         request_id=request_id,

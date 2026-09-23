@@ -18,8 +18,8 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +28,9 @@ from auth import HMACAuthMiddleware, RequestContextMiddleware
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
+from scheduler import get_scheduler
 from security import parse_keys
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -60,19 +61,27 @@ _metrics: dict[str, Any] = {
     "by_stage": {},  # stage -> count
     "by_code": {},  # error code -> count
     "total_duration": 0.0,
+    "started_jobs": 0,  # jobs the scheduler actually started
+    "total_wait": 0.0,  # summed queue wait (created -> started)
     "started_at": time.time(),
 }
 
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
-    task = asyncio.create_task(_cleanup_loop())
+    cleanup_task = asyncio.create_task(_cleanup_loop())
+    disk_task = asyncio.create_task(_disk_guard_loop())
+    scheduler = get_scheduler(_process_job)
+    await scheduler.start()
     try:
         yield
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        await scheduler.stop()
+        cleanup_task.cancel()
+        disk_task.cancel()
+        for task in (cleanup_task, disk_task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 async def _cleanup_loop() -> None:
@@ -80,8 +89,42 @@ async def _cleanup_loop() -> None:
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
         try:
             await job_store.cleanup_expired_files(WORK_DIR)
+            await _cleanup_work_dirs()
         except Exception as exc:  # never let cleanup kill the loop
             logger.warning("cleanup failed: %s", exc)
+
+
+async def _cleanup_work_dirs() -> None:
+    """Drop WORK_DIR/{job_id} trees older than WORK_DIR_TTL_SECONDS (T5.2)."""
+    ttl = int(os.getenv("WORK_DIR_TTL_SECONDS", "86400"))
+    if not WORK_DIR.exists():
+        return
+    now = time.time()
+    for child in WORK_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            if now - child.stat().st_mtime > ttl:
+                await asyncio.to_thread(shutil.rmtree, child, True)
+                logger.info("removed expired work dir %s", child.name)
+        except Exception:
+            continue
+
+
+async def _disk_guard_loop() -> None:
+    """Warn when the work volume is nearly full (plan/009 T5.2)."""
+    min_free_mb = int(os.getenv("DISK_MIN_FREE_MB", "5120"))
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+        try:
+            usage = shutil.disk_usage(str(WORK_DIR if WORK_DIR.exists() else Path("/")))
+            free_mb = usage.free // (1024 * 1024)
+            if free_mb < min_free_mb:
+                logger.warning(
+                    "disk low: %d MB free (threshold %d MB) at %s", free_mb, min_free_mb, WORK_DIR
+                )
+        except Exception as exc:
+            logger.debug("disk guard failed: %s", exc)
 
 
 app = FastAPI(title="Pipeline Worker", version="0.1.0", lifespan=lifespan)
@@ -96,9 +139,6 @@ app.add_middleware(
 )
 app.add_middleware(HMACAuthMiddleware)
 
-_semaphore = asyncio.Semaphore(CONCURRENCY)
-
-
 # ---------------------------------------------------------------------------
 # DTOs
 # ---------------------------------------------------------------------------
@@ -110,6 +150,7 @@ class TranslateOptions(BaseModel):
     subtitle_position: str = Field(default="bottom", pattern="^(bottom|top)$")
     remove_original_subtitles: bool = True
     burn_subtitles: bool = True
+    subtitle_style: dict | None = None
     min_speed: float = Field(default=0.8, ge=0.5, le=1.0)
     max_speed: float = Field(default=1.3, ge=1.0, le=2.0)
 
@@ -121,7 +162,15 @@ class TranslateRequest(BaseModel):
     target_language: str = Field(default="vi", min_length=2, max_length=10)
     voice: str | None = Field(default=None, max_length=100)
     options: TranslateOptions = Field(default_factory=TranslateOptions)
+    priority: int = Field(default=0, ge=-100, le=100)
+    user_id: str | None = Field(default=None, max_length=64)
     job_id: str | None = Field(default=None, max_length=64)
+
+
+class UploadPresignRequest(BaseModel):
+    key: str = Field(..., min_length=1, max_length=1024)
+    content_type: str | None = Field(default=None, max_length=100)
+    content_length: int | None = Field(default=None, ge=1, le=5368709120)
 
 
 def _canonical_idempotency_key(req: TranslateRequest, user_id: str | None) -> str:
@@ -161,11 +210,86 @@ async def health():
 async def metrics():
     uptime = time.time() - _metrics["started_at"]
     avg = _metrics["total_duration"] / _metrics["requests"] if _metrics["requests"] else 0
+    # queue depth (T5.1) + cache stats (T1.5) + breaker counts (T2.5)
+    try:
+        from job_queue import queue_depth as _qd
+
+        qd = await _qd()
+    except Exception:
+        qd = None
+    try:
+        from cache import CACHE_DIR, hit_rate
+        from cache import stats as cache_counters
+
+        cache_files = len(list(CACHE_DIR.glob("*"))) if CACHE_DIR.exists() else 0
+        cache_size = (
+            sum(p.stat().st_size for p in CACHE_DIR.glob("*") if p.is_file())
+            if CACHE_DIR.exists()
+            else 0
+        )
+        cache_hit_rate = hit_rate()
+        cache_stats = cache_counters()
+    except Exception:
+        cache_files = None
+        cache_size = None
+        cache_hit_rate = None
+        cache_stats = {}
+    try:
+        import resilience
+
+        breakers = {k: v.current_state for k, v in resilience._breakers.items()}
+    except Exception:
+        breakers = {}
     return {
         **_metrics,
         "uptime_seconds": round(uptime, 1),
         "avg_duration_seconds": round(avg, 2),
+        "queue_depth": qd,
+        "queue_wait_seconds": round(_metrics["total_wait"] / _metrics["started_jobs"], 2)
+        if _metrics["started_jobs"]
+        else 0,
+        "cache_files": cache_files,
+        "cache_size_bytes": cache_size,
+        "cache_hit_rate": cache_hit_rate,
+        "cache": cache_stats,
+        "breakers": breakers,
+        "cost_estimate_usd": round(_estimate_cost(), 4),
     }
+
+
+def _estimate_cost() -> float:
+    """Rough per-process estimate so operators see spend without a billing call.
+
+    Gemini Flash pricing is per token and the worker does not receive usage
+    metadata back through the SDK path we use, so this is a deliberately coarse
+    per-completed-job estimate. It is a monitoring signal, not an invoice.
+    """
+    per_job = float(os.getenv("COST_ESTIMATE_PER_JOB_USD", "0.01"))
+    return _metrics["success"] * per_job
+
+
+@app.post("/uploads/presign")
+async def create_upload_presign(req: UploadPresignRequest):
+    """Presigned PUT for browser direct-to-storage upload (plan/009 T3.1)."""
+    if not req.key.startswith("uploads/"):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_KEY", "message": "key must start with uploads/"},
+        )
+    try:
+        import storage as s3
+
+        url = await asyncio.to_thread(s3.presign_put, req.key, None, req.content_type)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=500, detail={"code": "S3_NOT_CONFIGURED", "message": str(exc)}
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail={"code": "PRESIGN_FAILED", "message": str(exc)}
+        ) from exc
+    ttl = int(os.getenv("PRESIGN_TTL_SECONDS", "900"))
+    return {"upload_url": url, "object_key": req.key, "key": req.key, "expires_in": ttl}
 
 
 # ---------------------------------------------------------------------------
@@ -173,42 +297,39 @@ async def metrics():
 # ---------------------------------------------------------------------------
 
 
-async def _process_job(job_id: str, request: TranslateRequest, request_id: str | None) -> None:
-    """Orchestrate stages via pipeline.py (T2.4) with resume and metrics."""
+async def _process_job(job_id: str) -> None:
+    """Run one job. Invoked by the scheduler (T5.1), never inline from a route."""
     start = time.time()
     _metrics["requests"] += 1
+    job = await job_store.get_job(job_id)
     try:
-        async with _semaphore:
-            # Support local file for E2E tests: if source_url is a local path, copy it
-            # into the job's work dir before calling the real pipeline. The pipeline
-            # itself also handles source_key (S3) and would handle source_url via
-            # video-worker for production — we just ensure a local file works.
-            if request.source_url and Path(request.source_url).exists():
-                # create work dir early and copy
+        if job is None:
+            return
+        # queue wait (created -> started) for T5.3
+        _metrics["started_jobs"] += 1
+        _metrics["total_wait"] += max(0.0, start - job.created_at)
+        # Local-file support for tests: copy into the work dir and mark the
+        # download stage done so the pipeline skips it. Remote URLs go through
+        # video-worker inside pipeline.run_pipeline.
+        source_url = job.source_url
+        if source_url:
+            local: Path | None = None
+            if source_url.startswith("file://"):
+                local = Path(source_url[7:])
+            elif Path(source_url).exists():
+                local = Path(source_url)
+            if local and local.exists():
                 work = WORK_DIR / job_id
                 work.mkdir(parents=True, exist_ok=True)
                 dst = work / "source.mp4"
                 if not dst.exists():
-                    import shutil
+                    await asyncio.to_thread(shutil.copy2, local, dst)
+                await job_store.update_job(
+                    job_id, stage_state={**job.stage_state, "downloading": "done"}
+                )
+        import pipeline as pipeline_mod
 
-                    shutil.copy2(request.source_url, dst)
-                # trick pipeline into skipping download: mark downloading done
-                await job_store.update_job(job_id, stage_state={"downloading": "done"})
-            # also support file:// URLs
-            elif request.source_url and request.source_url.startswith("file://"):
-                p = Path(request.source_url[7:])
-                if p.exists():
-                    work = WORK_DIR / job_id
-                    work.mkdir(parents=True, exist_ok=True)
-                    dst = work / "source.mp4"
-                    if not dst.exists():
-                        import shutil
-
-                        shutil.copy2(p, dst)
-                    await job_store.update_job(job_id, stage_state={"downloading": "done"})
-            import pipeline as pipeline_mod
-
-            await pipeline_mod.run_pipeline(job_id)
+        await pipeline_mod.run_pipeline(job_id)
         job = await job_store.get_job(job_id)
         if job and job.status == "completed":
             _metrics["success"] += 1
@@ -224,7 +345,9 @@ async def _process_job(job_id: str, request: TranslateRequest, request_id: str |
         _metrics["by_code"][code] = _metrics["by_code"].get(code, 0) + 1
         # run_pipeline already set job to failed, but ensure
         try:
-            await job_store.update_job(job_id, status="failed", error={"code": code, "message": str(exc)})
+            await job_store.update_job(
+                job_id, status="failed", error={"code": code, "message": str(exc)}
+            )
         except Exception:
             pass
     finally:
@@ -280,11 +403,13 @@ async def create_translate_job(req: TranslateRequest, request: Request):
         voice=req.voice,
         options=req.options.model_dump(),
         idempotency_key=idempotency_key,
-        user_id=None,
+        user_id=req.user_id,
+        priority=req.priority,
         request_id=request_id,
         job_id=req.job_id,
     )
-    asyncio.create_task(_process_job(job.job_id, req, request_id))
+    # The scheduler picks this up by (priority DESC, created_at ASC) (T5.1).
+    logger.info("job queued", extra={"job_id": job.job_id, "priority": job.priority})
     return JSONResponse(status_code=202, content=job.to_dict())
 
 
@@ -309,6 +434,42 @@ async def cancel_job(job_id: str):
     return (await job_store.get_job(job_id)).to_dict()  # type: ignore[union-attr]
 
 
+@app.get("/presign")
+async def presign_key(key: str):
+    """Presign an object key directly (plan/009 §5.1).
+
+    The API stores artifact keys, so it can still hand the browser a download URL
+    after this worker restarts and loses its in-memory job. Only keys under the
+    known prefixes are signable.
+    """
+    if not (key.startswith("results/") or key.startswith("uploads/")):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_KEY", "message": "key must start with results/ or uploads/"},
+        )
+    try:
+        import storage as s3
+
+        exists = await asyncio.to_thread(s3.exists, key)
+        if not exists:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "NOT_FOUND", "message": f"object not found: {key}"},
+            )
+        url = await asyncio.to_thread(s3.presign_get, key)
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=500, detail={"code": "S3_NOT_CONFIGURED", "message": str(exc)}
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail={"code": "PRESIGN_FAILED", "message": str(exc)}
+        ) from exc
+    return {"url": url, "key": key, "expires_in": int(os.getenv("PRESIGN_TTL_SECONDS", "900"))}
+
+
 @app.get("/jobs/{job_id}/file")
 async def get_job_file(job_id: str):
     job = await job_store.get_job(job_id)
@@ -325,10 +486,26 @@ async def get_transcript(job_id: str, format: str = "json"):
     job = await job_store.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    # TODO T1.4: return transcript.md / .srt / json from artifacts
     if format not in ("json", "md", "srt"):
         raise HTTPException(status_code=400, detail="format must be json, md or srt")
-    return {"job_id": job_id, "format": format, "segments": []}
+    work = WORK_DIR / job_id
+    if format == "json":
+        seg = work / "segments.json"
+        if not seg.exists():
+            raise HTTPException(status_code=404, detail="Transcript not ready")
+        return JSONResponse(content=json.loads(seg.read_text(encoding="utf-8")))
+    name = "transcript.md" if format == "md" else "transcript.srt"
+    path = work / name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Transcript not ready")
+    media = (
+        "text/markdown; charset=utf-8" if format == "md" else "application/x-subrip; charset=utf-8"
+    )
+    return Response(
+        content=path.read_text(encoding="utf-8"),
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 
 @app.get("/jobs/{job_id}/events")

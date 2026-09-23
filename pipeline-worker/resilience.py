@@ -20,7 +20,13 @@ import os
 
 import pybreaker
 from errors import PermanentError, TransientError
-from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, stop_after_delay, wait_exponential_jitter
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    stop_after_delay,
+    wait_exponential_jitter,
+)
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 MAX_ELAPSED = int(os.getenv("MAX_ELAPSED_SECONDS", "60"))

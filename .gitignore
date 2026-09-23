@@ -14,3 +14,7 @@ video-worker/cookies/*.txt
 video-worker/cookies/incoming/
 video-worker/output/
 !video-worker/cookies/.gitkeep
+
+# pipeline-worker runtime dirs
+pipeline-worker/cache/
+pipeline-worker/output/

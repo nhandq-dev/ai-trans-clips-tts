@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
 from pathlib import Path
 
 from errors import ALIGN_FAILED, PermanentError, TransientError
@@ -116,7 +115,9 @@ async def fit_to_slot(
         str(tmp),
     ]
     # For apad case, we need to ensure duration is exactly slot: already in filter
-    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise TransientError(ALIGN_FAILED, (stderr or b"").decode(errors="replace")[-600:])
@@ -127,7 +128,7 @@ async def fit_to_slot(
         "tts_duration": round(tts_dur, 3),
         "slot": round(slot, 3),
         "ratio": round(ratio, 3),
-        "speed": round(speed, 3) if 'speed' in locals() else None,
+        "speed": round(speed, 3) if "speed" in locals() else None,
         "fits": fits,
         "output_duration": round(out_dur, 3),
     }

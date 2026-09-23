@@ -6,22 +6,23 @@ import asyncio
 import hashlib
 import hmac
 import json
+import json as _json
 import os
 import time
 import uuid
 from pathlib import Path
 
 import httpx
-from errors import PermanentError, TTS_FAILED, TransientError
+from errors import TTS_FAILED, PermanentError, TransientError
 from resilience import call_with_breaker_and_retry
 
 TTS_WORKER_URL = os.getenv("TTS_WORKER_URL", "http://127.0.0.1:8004").rstrip("/")
 HMAC_KEYS_JSON = os.getenv("HMAC_KEYS_JSON", "")
 TTS_CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "2"))
 
-# pick a signing key — pipeline signs TTS calls with its own key, which TTS worker now trusts
-# (shared HMAC_KEYS_JSON). Prefer pipeline-key-1, fallback to first key.
-import json as _json
+# pipeline signs TTS calls with its own key, which the TTS worker now trusts
+# via the shared HMAC_KEYS_JSON. Prefer pipeline-key-1, fall back to the first key.
+
 
 def _signing_key() -> tuple[str, str]:
     try:
@@ -59,6 +60,22 @@ def _hmac_headers(method: str, path_and_query: str, body: bytes) -> dict[str, st
 
 async def _call_tts(text: str, language: str, voice: str | None, dest: Path) -> Path:
     """Single TTS call — no retry/breaker, just the HTTP."""
+    # cache-aside (T1.5)
+    try:
+        from cache import get_cache, put_cache, tts_cache_key
+
+        engine = "vieneu" if language == "vi" else "edge-tts"
+        _key = tts_cache_key(text, language, voice, engine)
+        _cached = get_cache(_key)
+        if _cached:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(dest) + ".tmp")
+            tmp.write_bytes(_cached)
+            tmp.replace(dest)
+            return dest
+    except Exception:
+        pass
+
     body_dict = {"text": text, "language": language}
     if voice:
         body_dict["voice"] = voice
@@ -80,16 +97,19 @@ async def _call_tts(text: str, language: str, voice: str | None, dest: Path) -> 
     tmp = Path(str(dest) + ".tmp")
     tmp.write_bytes(resp.content)
     tmp.replace(dest)
+    try:
+        from cache import put_cache, tts_cache_key
+
+        engine = "vieneu" if language == "vi" else "edge-tts"
+        put_cache(tts_cache_key(text, language, voice, engine), resp.content)
+    except Exception:
+        pass
     return dest
 
 
-async def synthesize_segment(
-    text: str, language: str, voice: str | None, dest: Path
-) -> Path:
+async def synthesize_segment(text: str, language: str, voice: str | None, dest: Path) -> Path:
     """Synthesize one segment with breaker+retry (plan/009 T2.5)."""
-    return await call_with_breaker_and_retry(
-        "tts", _call_tts, text, language, voice, dest
-    )
+    return await call_with_breaker_and_retry("tts", _call_tts, text, language, voice, dest)
 
 
 async def synthesize_all(
@@ -113,11 +133,11 @@ async def synthesize_all(
                 return dest
             try:
                 return await synthesize_segment(text, language, voice, dest)
-            except PermanentError as exc:
+            except PermanentError:
                 # invalid voice etc — don't retry, mark and continue
                 # we still return None so caller can decide
                 raise
-            except TransientError as exc:
+            except TransientError:
                 # breaker may have opened; propagate but caller can handle partial
                 raise
 

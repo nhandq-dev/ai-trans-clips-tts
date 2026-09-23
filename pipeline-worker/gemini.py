@@ -156,6 +156,23 @@ async def transcribe_and_translate(
     if not audio_bytes:
         raise PermanentError(GEMINI_FAILED, "empty audio file")
 
+    # cache-aside (T1.5): check Gemini cache before calling
+    try:
+        from cache import gemini_cache_key, get_cache, put_cache
+
+        for _model in [DEFAULT_MODEL] + [m for m in FALLBACK_MODELS if m != DEFAULT_MODEL]:
+            _key = gemini_cache_key(audio_bytes, source_language, target_language, _model)
+            _cached = get_cache(_key)
+            if _cached:
+                try:
+                    _res = TranscriptionResult.model_validate_json(_cached)
+                    logger.info("gemini cache hit model=%s", _model)
+                    return _res
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     client = _client()
     prompt = _prompt(source_language, target_language)
     models = [DEFAULT_MODEL] + [m for m in FALLBACK_MODELS if m != DEFAULT_MODEL]
@@ -172,6 +189,16 @@ async def transcribe_and_translate(
 
             result.segments = normalize_segments(result.segments)
             logger.info("gemini success model=%s segments=%d", model, len(result.segments))
+            # put cache
+            try:
+                from cache import gemini_cache_key, put_cache
+
+                put_cache(
+                    gemini_cache_key(audio_bytes, source_language, target_language, model),
+                    result.model_dump_json().encode(),
+                )
+            except Exception:
+                pass
             return result
         except PermanentError as exc:
             logger.warning("gemini permanent error model=%s: %s", model, exc.message)

@@ -24,7 +24,9 @@ PRESIGN_TTL_SECONDS = int(os.getenv("PRESIGN_TTL_SECONDS", "900"))
 
 def _client():
     if not S3_BUCKET or not S3_ACCESS_KEY_ID or not S3_SECRET_ACCESS_KEY:
-        raise RuntimeError("S3 is not configured (S3_BUCKET / S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY)")
+        raise RuntimeError(
+            "S3 is not configured (S3_BUCKET / S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY)"
+        )
     kwargs: dict = {
         "region_name": S3_REGION,
         "aws_access_key_id": S3_ACCESS_KEY_ID,

@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shlex
-import subprocess
 from pathlib import Path
 
 from errors import NO_AUDIO_TRACK, PermanentError, TransientError
@@ -58,7 +56,8 @@ async def extract_audio(src: str | Path, dst: str | Path) -> Path:
     if not info["has_audio"]:
         raise PermanentError(NO_AUDIO_TRACK, "no audio track")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    # atomic: write to .tmp then mv (use str(dst)+".tmp" but force flac format so .tmp suffix doesn't confuse ffmpeg)
+    # atomic: write to str(dst)+".tmp" and force the flac muxer so the .tmp
+    # suffix does not make ffmpeg guess the wrong output format
     tmp = Path(str(dst) + ".tmp")
     proc = await asyncio.create_subprocess_exec(
         FFMPEG_BIN,
@@ -90,3 +89,50 @@ def extract_audio_sync(src: str | Path, dst: str | Path) -> Path:
     import asyncio as _asyncio
 
     return _asyncio.run(extract_audio(src, dst))
+
+
+async def extract_thumbnail(
+    video_path: str | Path,
+    dst: str | Path,
+    at_seconds: float | None = None,
+    width: int = 640,
+) -> Path:
+    """Grab one frame as a JPEG thumbnail (used by the projects grid).
+
+    Defaults to ~10% into the video (capped at 3s) so we skip intros/black
+    frames while staying early enough to be representative.
+    """
+    video_path, dst = Path(video_path), Path(dst)
+    if at_seconds is None:
+        info = await probe(video_path)
+        duration = info.get("duration") or 0
+        at_seconds = min(3.0, duration * 0.1) if duration > 1 else 0.0
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(dst) + ".tmp")
+    proc = await asyncio.create_subprocess_exec(
+        FFMPEG_BIN,
+        "-y",
+        "-ss",
+        f"{at_seconds:.3f}",
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        "-vf",
+        f"scale={width}:-2",
+        "-q:v",
+        "4",
+        "-f",
+        "image2",
+        "-c:v",
+        "mjpeg",
+        str(tmp),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        raise TransientError("THUMBNAIL_FAILED", (stderr or b"").decode(errors="replace")[-400:])
+    tmp.replace(dst)
+    return dst

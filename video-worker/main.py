@@ -276,6 +276,78 @@ async def download_video(req: DownloadRequest):
     )
 
 
+@app.get("/audio")
+async def get_audio(url: str):
+    """Download and return the audio track only (16 kHz mono FLAC).
+
+    Optional convenience for a text-only translation flow (plan/009 T5.5). The
+    video is still fetched and muxed by yt-dlp first because that is the only
+    reliable path across platforms; the extraction itself is a cheap local pass.
+    """
+    try:
+        validate_url(url)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail={"code": "UNSUPPORTED", "message": str(exc)}
+        ) from exc
+
+    job_id = uuid.uuid4().hex[:32]
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    start = time.time()
+    _metrics["requests"] += 1
+
+    async with _semaphore:
+        try:
+            result = await download(url, job_id)
+        except DownloadError as exc:
+            _metrics["failed"] += 1
+            _metrics["by_code"][exc.code] = _metrics["by_code"].get(exc.code, 0) + 1
+            raise HTTPException(
+                status_code=exc.http_status,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+        audio_path = OUTPUT_DIR / f"{job_id}.flac"
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(result.path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "flac",
+            "-f",
+            "flac",
+            str(audio_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            audio_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "NO_AUDIO_TRACK",
+                    "message": (stderr or b"").decode(errors="replace")[-400:],
+                },
+            )
+
+    _metrics["success"] += 1
+    _metrics["total_duration"] += time.time() - start
+
+    return FileResponse(
+        path=str(audio_path),
+        media_type="audio/flac",
+        filename=f"{job_id}.flac",
+        background=BackgroundTask(_cleanup, audio_path),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Async jobs — for slow platforms and to avoid Vercel 60s timeout
 # ---------------------------------------------------------------------------
@@ -295,7 +367,8 @@ async def _process_job(job_id: str, url: str) -> None:
     try:
         async with _semaphore:
             result = await download(url, job_id)
-        # T0.4: upload to object storage when configured, so Vercel can redirect (bypass 4.5MB limit)
+        # T0.4: upload to object storage when configured so Vercel can redirect
+        # (this is what keeps the download under the 4.5 MB function limit)
         s3_key = None
         if _S3_ENABLED and s3_storage and not result.from_cache and result.path.exists():
             try:
