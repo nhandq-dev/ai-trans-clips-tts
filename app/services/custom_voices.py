@@ -137,7 +137,7 @@ def clone_voice(
     voice_id = uuid.uuid4().hex
     workdir = Path(tempfile.mkdtemp(prefix="clone_"))
     try:
-        source = workdir / f"reference{Path(filename or 'reference.wav').suffix or '.bin'}"
+        source = workdir / f"source{Path(filename or 'reference.wav').suffix or '.bin'}"
         source.write_bytes(data)
 
         duration = _probe_duration(source)
