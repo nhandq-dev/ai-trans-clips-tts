@@ -61,9 +61,10 @@ def _synth_vieneu(
     fmt: str,
     workdir: Path,
     progress: ProgressCallback,
+    voice_data: object | None = None,
 ) -> None:
     model = _get_model()
-    resolved = _resolve_vieneu_voice(voice)
+    resolved = voice_data if voice_data is not None else _resolve_vieneu_voice(voice)
     chunks = split_text(text, get_settings().vieneu_chunk_chars)
     files: list[Path] = []
     for i, chunk in enumerate(chunks):
@@ -122,6 +123,7 @@ def generate_tts(
     out_path: str | Path | None = None,
     fmt: str | None = None,
     progress: ProgressCallback = None,
+    voice_data: object | None = None,
 ) -> Path:
     text = (text or "").strip()
     if not text:
@@ -140,7 +142,7 @@ def generate_tts(
     workdir = make_workdir(dest.parent)
     try:
         if is_vietnamese(language):
-            _synth_vieneu(text, voice, dest, fmt, workdir, progress)
+            _synth_vieneu(text, voice, dest, fmt, workdir, progress, voice_data)
         else:
             _synth_edge(text, language, voice, dest, fmt, workdir, progress)
         if progress:
@@ -148,3 +150,17 @@ def generate_tts(
         return dest
     finally:
         cleanup_workdir(workdir)
+
+
+def encode_reference(reference_wav: Path) -> object:
+    """Encode a reference clip into a reusable VieNeu voice embedding."""
+    with _INFER_LOCK:
+        return _get_model().encode_reference(str(reference_wav))
+
+
+def render_sample(text: str, voice_data: object, dest: Path) -> None:
+    """Synthesize `text` with a cloned voice and save the raw wav to `dest`."""
+    model = _get_model()
+    with _INFER_LOCK:
+        audio = model.infer(text=text, voice=voice_data)
+        model.save(audio, str(dest))

@@ -6,10 +6,20 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Custom (cloned) Vietnamese voices: `POST /v1/voices/clone`, `DELETE /v1/voices/clone/{voice_id}`,
+  and `GET /v1/voices/clone/{voice_id}/sample`. References and generated samples are stored in
+  S3-compatible object storage (Cloudflare R2) under `custom-voices/{owner}/{voice_id}/`, scoped by
+  the `owner` query parameter. `POST /v1/tts` accepts `owner` and a registered custom `voice` id.
+- `app/services/object_storage.py` (boto3 S3/R2 client) and `app/services/custom_voices.py`
+  (ffprobe duration check, ffmpeg normalization, VieNeu `encode_reference`, greeting sample,
+  in-process embedding cache).
 - `DOCS_PASSWORD`: HTTP Basic auth for `/docs`, `/redoc`, and `/openapi.json`.
 
 ### Changed
 
+- `REQUEST_MAX_BODY_BYTES` default raised to 6 MB so an 8–10 s reference upload fits.
+- New configuration: `CUSTOM_VOICE_*`, `FFPROBE_BIN`, and `S3_*` (region/endpoint/bucket/keys/
+  force-path-style). Leave the `S3_*` credentials blank to disable custom voices.
 - Docs are no longer auto-disabled in production. They stay reachable but require
   `DOCS_PASSWORD`; startup fails in production when docs are enabled without a password.
   Set `DISABLE_DOCS=true` to remove them entirely.

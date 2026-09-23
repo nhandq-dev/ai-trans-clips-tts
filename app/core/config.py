@@ -48,11 +48,27 @@ class Settings(BaseSettings):
     edge_fallback_voice: str = "en-US-JennyNeural"
     edge_chunk_chars: int = 300
 
+    # Custom (cloned) Vietnamese voices
+    custom_voice_enabled: bool = True
+    custom_voice_min_seconds: float = 8.0
+    custom_voice_max_seconds: float = 10.0
+    custom_voice_max: int = 3
+    custom_voice_prefix: str = "custom-voices"
+    ffprobe_bin: str = "ffprobe"
+
+    # Object storage (S3-compatible; Cloudflare R2 in production)
+    s3_endpoint: str = ""
+    s3_region: str = "auto"
+    s3_bucket: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_force_path_style: bool = True
+
     # Security
     hmac_keys_json: str = ""
     hmac_max_skew_seconds: int = 60
     hmac_nonce_ttl_seconds: int = 300
-    request_max_body_bytes: int = 2 * 1024 * 1024
+    request_max_body_bytes: int = 6 * 1024 * 1024
 
     # Operations
     request_id_header: str = "X-Request-Id"
@@ -95,6 +111,15 @@ class Settings(BaseSettings):
             )
         if self.sync_max_text_length > self.max_text_length:
             raise ValueError("SYNC_MAX_TEXT_LENGTH cannot exceed MAX_TEXT_LENGTH")
+        if self.custom_voice_max_seconds <= self.custom_voice_min_seconds:
+            raise ValueError("CUSTOM_VOICE_MAX_SECONDS must exceed CUSTOM_VOICE_MIN_SECONDS")
+        if self.custom_voice_min_seconds <= 0:
+            raise ValueError("CUSTOM_VOICE_MIN_SECONDS must be positive")
+        s3_parts = (self.s3_bucket, self.s3_access_key_id, self.s3_secret_access_key)
+        if any(s3_parts) and not all(s3_parts):
+            raise ValueError(
+                "S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together"
+            )
         return self
 
     def _parse_hmac_keys(self) -> dict[str, str]:
@@ -125,6 +150,11 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def s3_configured(self) -> bool:
+        """True when an S3-compatible bucket and credentials are configured."""
+        return bool(self.s3_bucket and self.s3_access_key_id and self.s3_secret_access_key)
 
     @property
     def docs_disabled(self) -> bool:
