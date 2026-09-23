@@ -192,7 +192,9 @@ async def run_pipeline(job_id: str):
         # ------------------------------------------------------------------
         # Stage: downloading (or source_path local)
         # ------------------------------------------------------------------
-        await _update(job_id, "downloading")
+        # Flip to `processing` as soon as work actually starts, so the UI never
+        # shows a running job as merely "queued" while its stage advances.
+        await _update(job_id, "downloading", status="processing")
         job = await jobs.get_job(job_id)
         assert job is not None
         work = WORK_DIR / job_id
