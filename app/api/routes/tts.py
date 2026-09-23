@@ -10,6 +10,7 @@ from starlette.background import BackgroundTask
 
 from app.core.config import get_settings
 from app.schemas.tts import TTSRequest, TTSValidationError, validate_tts_request
+from app.services import custom_voices
 from app.services.engine_router import engine_for
 from app.services.synthesis import generate_tts
 
@@ -20,8 +21,12 @@ _semaphore = asyncio.Semaphore(get_settings().tts_concurrency)
 
 @router.post("/v1/tts", response_model=None)
 async def tts(request: Request, req: TTSRequest):
+    voice_data = None
+    if req.voice and req.owner is not None:
+        voice_data = await asyncio.to_thread(custom_voices.load_voice, req.owner, req.voice)
+
     try:
-        fmt = validate_tts_request(req)
+        fmt = validate_tts_request(req, custom_voice=voice_data is not None)
     except TTSValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -42,6 +47,8 @@ async def tts(request: Request, req: TTSRequest):
                 req.voice,
                 str(dest),
                 fmt,
+                None,
+                voice_data,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

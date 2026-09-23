@@ -15,7 +15,9 @@ def ffmpeg_bin() -> str:
 def run(cmd: list[str]) -> None:
     proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.decode(errors="replace")[:500])
+        # The useful part of ffmpeg's stderr is at the end; the banner is first.
+        detail = proc.stderr.decode(errors="replace")
+        raise RuntimeError(detail[-800:])
 
 
 def transcode(src: Path, dest: Path) -> None:

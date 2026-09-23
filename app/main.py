@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import health, tts, voices
+from app.api.routes import custom_voices, health, tts, voices
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
@@ -51,6 +51,7 @@ app.add_middleware(RequestContextMiddleware, settings=settings)
 
 app.include_router(health.router)
 app.include_router(voices.router)
+app.include_router(custom_voices.router)
 app.include_router(tts.router)
 
 

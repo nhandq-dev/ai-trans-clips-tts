@@ -46,6 +46,9 @@ production unless docs are disabled.
 | GET | `/health/ready` | none | Dependencies usable (ffmpeg, output dir, model cache, keys, concurrency) |
 | GET | `/v1/voices` | HMAC | Languages + voices catalog |
 | POST | `/v1/tts` | HMAC | Generate audio; returns `audio/mpeg` or `audio/wav` |
+| POST | `/v1/voices/clone?owner=&name=&language=vi` | HMAC | Register a cloned voice from a raw audio body |
+| DELETE | `/v1/voices/clone/{voice_id}?owner=` | HMAC | Delete a cloned voice |
+| GET | `/v1/voices/clone/{voice_id}/sample?owner=` | HMAC | Generated sample clip (`audio/mpeg`) |
 
 `POST /v1/tts` body:
 
@@ -57,6 +60,18 @@ production unless docs are disabled.
 - `voice` must belong to the selected language/engine (see `/v1/voices`).
 - `text` is limited by `MAX_TEXT_LENGTH`; synchronous requests also respect `SYNC_MAX_TEXT_LENGTH`.
 - `format` is `mp3` or `wav`.
+- `owner` (optional) scopes a cloned voice: when set and `voice` is a registered custom voice id,
+  that cloned voice is used instead of a catalog voice.
+
+### Custom (cloned) voices
+
+Vietnamese only. A reference clip of `CUSTOM_VOICE_MIN_SECONDS`–`CUSTOM_VOICE_MAX_SECONDS`
+seconds (default 8–10) is uploaded as the raw request body; the worker validates it with ffprobe,
+normalizes it with ffmpeg, encodes it with VieNeu, and stores the reference, a generated greeting
+sample, and a metadata file in the S3-compatible bucket. Responses use `voice_id`, which is then
+passed as `voice` (with `owner`) to `POST /v1/tts`. Object storage is required; set `S3_BUCKET`,
+`S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY` (plus `S3_ENDPOINT`/`S3_REGION`/
+`S3_FORCE_PATH_STYLE` for R2). With storage unconfigured, the clone routes return `400`.
 
 ## Request signing (HMAC)
 
@@ -125,6 +140,9 @@ Environment variables (see `.env.example` for the full contract):
 | `HMAC_KEYS_JSON` | JSON map `{ keyId: secret }` the worker accepts |
 | `HMAC_MAX_SKEW_SECONDS`, `HMAC_NONCE_TTL_SECONDS` | replay protection |
 | `REQUEST_MAX_BODY_BYTES` | app-level body cap |
+| `CUSTOM_VOICE_ENABLED`, `CUSTOM_VOICE_MIN_SECONDS`, `CUSTOM_VOICE_MAX_SECONDS`, `CUSTOM_VOICE_MAX`, `CUSTOM_VOICE_PREFIX` | cloned-voice limits and storage prefix |
+| `S3_REGION`, `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE` | S3/R2 object storage for cloned voices |
+| `FFPROBE_BIN` | ffprobe binary (defaults to `PATH`) |
 | `REQUEST_ID_HEADER`, `ACCESS_LOG_ENABLED` | tracing + access logs |
 | `READINESS_WARMUP` | warm the VieNeu model on boot |
 

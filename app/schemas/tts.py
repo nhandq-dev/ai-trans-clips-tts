@@ -17,14 +17,18 @@ class TTSRequest(BaseModel):
     language: str = Field(default="vi", max_length=20)
     voice: str | None = Field(default=None, max_length=100)
     format: str = Field(default_factory=lambda: get_settings().tts_format)
+    owner: int | None = Field(default=None, ge=1)
 
 
 def normalize_format(value: str) -> str:
     return value.lower().lstrip(".")
 
 
-def validate_tts_request(req: TTSRequest) -> str:
+def validate_tts_request(req: TTSRequest, *, custom_voice: bool = False) -> str:
     """Validate a request and return the normalized format.
+
+    Set `custom_voice=True` when `req.voice` is a registered cloned voice so the
+    catalog membership check is skipped.
 
     Raises `TTSValidationError` for anything the caller can fix; the route maps that to a 400.
     """
@@ -45,7 +49,10 @@ def validate_tts_request(req: TTSRequest) -> str:
             f"text exceeds the synchronous limit of {settings.sync_max_text_length}"
         )
 
-    if req.voice and not is_valid_voice(req.voice, req.language):
+    if custom_voice:
+        if req.language.strip().lower().split("-")[0] != "vi":
+            raise TTSValidationError("custom voices are only available for Vietnamese (vi)")
+    elif req.voice and not is_valid_voice(req.voice, req.language):
         raise TTSValidationError(f"voice {req.voice!r} is not valid for language {req.language!r}")
 
     return fmt
