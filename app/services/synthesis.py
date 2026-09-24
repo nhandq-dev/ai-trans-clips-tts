@@ -6,6 +6,8 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
+
 from app.core.config import get_settings
 from app.services.chunking import split_text
 from app.services.engine_router import EDGE_DEFAULT_VOICES, is_vietnamese, lang_code
@@ -47,6 +49,23 @@ def _resolve_vieneu_voice(voice: str | None) -> str:
     return value if value in VIENEU_VOICES else get_settings().vieneu_default_voice
 
 
+def to_vieneu_voice_arg(voice_data: object | None) -> dict | None:
+    """Wrap an encoded reference as the preset dict VieNeu's ``infer`` expects.
+
+    ``encode_reference`` returns ``(speaker_emb, ref_codes)``, but ``infer(voice=...)``
+    only understands a preset *name* or a preset *dict*. A bare tuple matches neither,
+    so VieNeu silently falls back to ``self._default_voice`` — which is why a cloned
+    voice came out sounding like the built-in default (Adam).
+    """
+    if voice_data is None:
+        return None
+    speaker_emb, ref_codes = voice_data  # type: ignore[misc]
+    return {
+        "speaker_emb": np.asarray(speaker_emb, dtype=np.float32),
+        "codes": None if ref_codes is None else np.asarray(ref_codes, dtype=np.int64),
+    }
+
+
 def _resolve_edge_voice(language: str, voice: str | None) -> str:
     value = (voice or "").strip()
     if value:
@@ -64,7 +83,9 @@ def _synth_vieneu(
     voice_data: object | None = None,
 ) -> None:
     model = _get_model()
-    resolved = voice_data if voice_data is not None else _resolve_vieneu_voice(voice)
+    resolved = (
+        to_vieneu_voice_arg(voice_data) if voice_data is not None else _resolve_vieneu_voice(voice)
+    )
     chunks = split_text(text, get_settings().vieneu_chunk_chars)
     files: list[Path] = []
     for i, chunk in enumerate(chunks):
@@ -162,5 +183,5 @@ def render_sample(text: str, voice_data: object, dest: Path) -> None:
     """Synthesize `text` with a cloned voice and save the raw wav to `dest`."""
     model = _get_model()
     with _INFER_LOCK:
-        audio = model.infer(text=text, voice=voice_data)
+        audio = model.infer(text=text, voice=to_vieneu_voice_arg(voice_data))
         model.save(audio, str(dest))
