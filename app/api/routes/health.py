@@ -54,6 +54,10 @@ def _concurrency_ready() -> bool:
     return get_settings().tts_concurrency >= 1
 
 
+def _workers_ready() -> bool:
+    return get_settings().tts_workers >= 1
+
+
 @router.get("/health/live", response_model=LiveResponse)
 async def live() -> LiveResponse:
     """Liveness: the process is up and the event loop is serving requests."""
@@ -69,6 +73,7 @@ async def ready(response: Response) -> ReadyResponse:
         "model_cache": _model_cache_accessible(),
         "signing_keys": _signing_keys_loaded(),
         "concurrency": _concurrency_ready(),
+        "workers": _workers_ready(),
     }
     reasons = [name for name, ok in checks.items() if not ok]
     if reasons:

@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # NOT a business limit — per-plan character caps live in the API
     # (`tts_max_chars_per_request`, plan/015 §5.3).
     sync_max_text_length: int = 2000
+    # uvicorn process count (plan/014 Phase 2). Read by docker-entrypoint.sh; each
+    # process loads its own model, so RAM scales with it while throughput does not
+    # scale linearly (measured 1 lane = 37.5, 4 lanes = 90.2 chars/s on 10 cores).
+    tts_workers: int = 1
+    # Requests admitted per process before queueing. Total in-flight is
+    # `tts_workers * tts_concurrency`, but only one synthesis runs per process.
     tts_concurrency: int = 2
     tts_format: str = "mp3"
     tts_output_dir: Path = Path("tts_output")
