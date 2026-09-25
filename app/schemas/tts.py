@@ -21,6 +21,9 @@ class TTSRequest(BaseModel):
     # Requesting user id. Only used by the async path, where the API asserts the
     # poller owns the job it asks about.
     user_id: int | None = Field(default=None, ge=1)
+    # Queue ordering: higher runs first (plan/014 P3.1). User plans use 10..100;
+    # the video pipeline reserves 500 so its dubbing is never starved.
+    priority: int = Field(default=0, ge=-1000, le=1000)
 
 
 def normalize_format(value: str) -> str:

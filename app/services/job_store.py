@@ -13,6 +13,7 @@ correct for a single process (local dev and tests).
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import time
 import uuid
@@ -27,7 +28,13 @@ JOB_COMPLETED = "completed"
 JOB_FAILED = "failed"
 
 QUEUE_KEY = "tts:jobs:queue"
+SEQ_KEY = "tts:jobs:seq"
 JOB_KEY_PREFIX = "tts:job:"
+
+# The queue is a sorted set scored `priority * SCORE_SCALE - seq`, so a blocking
+# ZPOPMAX yields the highest priority first and FIFO within the same priority.
+# SCORE_SCALE keeps every score inside the 53-bit float range (1000 * 1e12 = 1e15).
+SCORE_SCALE = 1_000_000_000_000
 
 
 @dataclass
@@ -45,6 +52,8 @@ class TtsJob:
     fmt: str = "mp3"
     owner: int | None = None
     user_id: int | None = None
+    #: Higher runs first. User plans use 10..100; the video pipeline reserves 500.
+    priority: int = 0
     audio_path: str | None = None
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -68,6 +77,7 @@ class TtsJob:
             "format": self.fmt,
             "text_length": self.text_length,
             "user_id": self.user_id,
+            "priority": self.priority,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "started_at": self.started_at,
@@ -84,7 +94,7 @@ def new_job(**kwargs: Any) -> TtsJob:
 # --- field encoding: Redis hashes only hold strings ---------------------------
 
 _FLOAT_FIELDS = {"created_at", "updated_at", "started_at", "finished_at"}
-_INT_FIELDS = {"progress", "owner", "user_id"}
+_INT_FIELDS = {"progress", "owner", "user_id", "priority"}
 
 
 def _encode(job: TtsJob) -> dict[str, str]:
@@ -100,6 +110,7 @@ def _encode(job: TtsJob) -> dict[str, str]:
         "fmt": job.fmt,
         "owner": "" if job.owner is None else str(job.owner),
         "user_id": "" if job.user_id is None else str(job.user_id),
+        "priority": str(job.priority),
         "audio_path": job.audio_path or "",
         "created_at": f"{job.created_at:.6f}",
         "updated_at": f"{job.updated_at:.6f}",
@@ -143,6 +154,7 @@ def _decode(raw: dict[str, str]) -> TtsJob | None:
         fmt=raw.get("fmt", "mp3"),
         owner=_to_int(raw.get("owner", "")),
         user_id=_to_int(raw.get("user_id", "")),
+        priority=_to_int(raw.get("priority", "")) or 0,
         audio_path=raw.get("audio_path") or None,
         created_at=_to_float(raw.get("created_at", "")) or 0.0,
         updated_at=_to_float(raw.get("updated_at", "")) or 0.0,
@@ -164,7 +176,7 @@ class JobStore(Protocol):
 
     async def update(self, job_id: str, **fields: Any) -> TtsJob | None: ...
 
-    async def enqueue(self, job_id: str) -> None: ...
+    async def enqueue(self, job_id: str, priority: int = 0) -> None: ...
 
     async def dequeue(self, timeout: int = 5) -> str | None: ...
 
@@ -180,7 +192,9 @@ class MemoryJobStore:
 
     def __init__(self, ttl_seconds: int = 86400) -> None:
         self._jobs: dict[str, TtsJob] = {}
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        # Max-heap of (-score, job_id); see SCORE_SCALE for the ordering.
+        self._queue: list[tuple[float, str]] = []
+        self._seq = 0
         self._ttl = ttl_seconds
 
     async def create(self, job: TtsJob) -> TtsJob:
@@ -200,14 +214,18 @@ class MemoryJobStore:
         job.updated_at = time.time()
         return job
 
-    async def enqueue(self, job_id: str) -> None:
-        await self._queue.put(job_id)
+    async def enqueue(self, job_id: str, priority: int = 0) -> None:
+        self._seq += 1
+        heapq.heappush(self._queue, (-(priority * SCORE_SCALE - self._seq), job_id))
 
     async def dequeue(self, timeout: int = 5) -> str | None:
-        try:
-            return await asyncio.wait_for(self._queue.get(), timeout=timeout)
-        except TimeoutError:
-            return None
+        deadline = time.monotonic() + timeout
+        while True:
+            if self._queue:
+                return heapq.heappop(self._queue)[1]
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
 
     async def ping(self) -> bool:
         return True
@@ -217,7 +235,7 @@ class MemoryJobStore:
 
 
 class RedisJobStore:
-    """Redis hash per job plus a list used as the work queue.
+    """Redis hash per job plus a sorted-set work queue ordered by priority.
 
     Updates write individual fields with `HSET` instead of read-modify-write, so a
     late progress callback cannot clobber the terminal status.
@@ -263,11 +281,12 @@ class RedisJobStore:
         await self._redis.hset(key, mapping=encoded)
         return await self.get(job_id)
 
-    async def enqueue(self, job_id: str) -> None:
-        await self._redis.lpush(self._queue_key, job_id)
+    async def enqueue(self, job_id: str, priority: int = 0) -> None:
+        seq = await self._redis.incr(SEQ_KEY)
+        await self._redis.zadd(self._queue_key, {job_id: priority * SCORE_SCALE - seq})
 
     async def dequeue(self, timeout: int = 5) -> str | None:
-        result = await self._redis.brpop(self._queue_key, timeout=timeout)
+        result = await self._redis.bzpopmax(self._queue_key, timeout=timeout)
         if not result:
             return None
         return result[1]

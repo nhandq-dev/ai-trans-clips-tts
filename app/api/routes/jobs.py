@@ -82,10 +82,17 @@ async def create_job(req: TTSRequest) -> dict:
         fmt=fmt,
         owner=req.owner,
         user_id=req.user_id,
+        priority=req.priority,
     )
     await store.create(job)
-    await store.enqueue(job.id)
-    logger.info("job_queued job=%s chars=%d language=%s", job.id, job.text_length, job.language)
+    await store.enqueue(job.id, req.priority)
+    logger.info(
+        "job_queued job=%s chars=%d language=%s priority=%d",
+        job.id,
+        job.text_length,
+        job.language,
+        job.priority,
+    )
     return job.public()
 
 

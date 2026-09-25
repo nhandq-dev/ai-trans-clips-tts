@@ -73,6 +73,39 @@ def test_memory_store_update_of_missing_job_is_a_noop():
     asyncio.run(scenario())
 
 
+def test_queue_serves_higher_priority_first():
+    async def scenario():
+        store = MemoryJobStore()
+        low = new_job(text="low", language="vi", fmt="mp3")
+        high = new_job(text="high", language="vi", fmt="mp3")
+        mid = new_job(text="mid", language="vi", fmt="mp3")
+        for job in (low, high, mid):
+            await store.create(job)
+        # Enqueued worst-first so ordering cannot come from insertion order.
+        await store.enqueue(low.id, 10)
+        await store.enqueue(mid.id, 100)
+        await store.enqueue(high.id, 500)
+
+        assert await store.dequeue(timeout=1) == high.id
+        assert await store.dequeue(timeout=1) == mid.id
+        assert await store.dequeue(timeout=1) == low.id
+
+    asyncio.run(scenario())
+
+
+def test_queue_is_fifo_within_the_same_priority():
+    async def scenario():
+        store = MemoryJobStore()
+        jobs = [new_job(text=str(i), language="vi", fmt="mp3") for i in range(3)]
+        for job in jobs:
+            await store.create(job)
+            await store.enqueue(job.id, 20)
+
+        assert [await store.dequeue(timeout=1) for _ in jobs] == [job.id for job in jobs]
+
+    asyncio.run(scenario())
+
+
 # --- runner -------------------------------------------------------------------
 
 
@@ -172,6 +205,24 @@ def test_create_job_returns_202_and_is_queryable(client, signer):
     fetched = _get(client, signer, f"/v1/tts/jobs/{payload['job_id']}")
     assert fetched.status_code == 200
     assert fetched.json()["job_id"] == payload["job_id"]
+
+
+def test_create_job_carries_the_priority(client, signer):
+    """The pipeline reserves a priority above every plan (plan/014 P3.1)."""
+    payload = _post_job(
+        client, signer, {"text": "xin chào", "language": "vi", "priority": 500}
+    ).json()
+    assert payload["priority"] == 500
+
+    default = _post_job(client, signer, {"text": "xin chào", "language": "vi"}).json()
+    assert default["priority"] == 0
+
+
+def test_priority_outside_the_allowed_range_is_rejected(client, signer):
+    assert (
+        _post_job(client, signer, {"text": "hi", "language": "vi", "priority": 5000}).status_code
+        == 422
+    )
 
 
 def test_unknown_job_returns_404(client, signer):

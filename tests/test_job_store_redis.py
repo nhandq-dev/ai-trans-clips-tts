@@ -97,6 +97,28 @@ def test_queue_is_fifo_and_empty_returns_none():
     run(scenario)
 
 
+def test_queue_orders_by_priority_then_fifo():
+    low = new_job(text="low", language="vi", fmt="mp3")
+    mid = new_job(text="mid", language="vi", fmt="mp3")
+    high = new_job(text="high", language="vi", fmt="mp3")
+    tie_a = new_job(text="a", language="vi", fmt="mp3")
+    tie_b = new_job(text="b", language="vi", fmt="mp3")
+
+    async def scenario(store: RedisJobStore):
+        for job in (low, mid, high, tie_a, tie_b):
+            await store.create(job)
+        await store.enqueue(low.id, 10)
+        await store.enqueue(mid.id, 100)
+        await store.enqueue(high.id, 500)
+        await store.enqueue(tie_a.id, 20)
+        await store.enqueue(tie_b.id, 20)
+
+        order = [await store.dequeue(timeout=1) for _ in range(5)]
+        assert order == [high.id, mid.id, tie_a.id, tie_b.id, low.id]
+
+    run(scenario)
+
+
 def test_updating_a_missing_job_returns_none():
     async def scenario(store: RedisJobStore):
         assert await store.update("does-not-exist", status=JOB_COMPLETED) is None
