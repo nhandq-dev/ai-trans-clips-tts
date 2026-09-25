@@ -67,8 +67,13 @@ def test_quota_on_one_model_falls_through_to_the_next(monkeypatch, tmp_path):
     loop must move straight on without retrying the exhausted one."""
     import asyncio
 
+    import cache as cache_module
     import gemini
     from schemas import TranscriptionResult
+
+    # The real cache dir is shared between runs, so a previous run would make the
+    # cache-aside lookup return early and the model loop would never be entered.
+    monkeypatch.setattr(cache_module, "CACHE_DIR", tmp_path / "cache")
 
     audio = tmp_path / "a.flac"
     audio.write_bytes(b"fake-audio")

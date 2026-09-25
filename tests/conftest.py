@@ -14,7 +14,6 @@ os.environ["APP_ENV"] = "development"
 os.environ["HMAC_KEYS_JSON"] = '{"test-key":"test-secret"}'
 os.environ.setdefault("HMAC_MAX_SKEW_SECONDS", "60")
 os.environ.setdefault("HMAC_NONCE_TTL_SECONDS", "300")
-os.environ.setdefault("MAX_TEXT_LENGTH", "5000")
 os.environ.setdefault("SYNC_MAX_TEXT_LENGTH", "2000")
 os.environ.setdefault("TTS_CONCURRENCY", "1")
 os.environ.setdefault("ACCESS_LOG_ENABLED", "false")

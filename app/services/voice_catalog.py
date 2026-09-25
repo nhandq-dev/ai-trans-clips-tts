@@ -437,8 +437,9 @@ def is_valid_voice(voice: str, language: str) -> bool:
 def catalog() -> dict:
     """Voice catalog plus the effective text limits.
 
-    Clients must read the limits from here instead of hardcoding them: the sync
-    cap depends on worker config (`SYNC_MAX_TEXT_LENGTH`), not on the client.
+    Clients must read the limit from here instead of hardcoding it: this is the worker's
+    technical ceiling for one synchronous request (`SYNC_MAX_TEXT_LENGTH`), not a business
+    limit. Per-plan character caps live in the API (`tts_max_chars_per_request`).
     """
     from app.core.config import get_settings
 
@@ -448,6 +449,5 @@ def catalog() -> dict:
         "voices": VOICES,
         "limits": {
             "syncMaxTextLength": settings.sync_max_text_length,
-            "maxTextLength": settings.max_text_length,
         },
     }

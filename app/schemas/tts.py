@@ -42,8 +42,6 @@ def validate_tts_request(req: TTSRequest, *, custom_voice: bool = False) -> str:
         raise TTSValidationError("format must be 'mp3' or 'wav'")
 
     text_length = len(req.text)
-    if text_length > settings.max_text_length:
-        raise TTSValidationError(f"text exceeds the maximum length of {settings.max_text_length}")
     if text_length > settings.sync_max_text_length:
         raise TTSValidationError(
             f"text exceeds the synchronous limit of {settings.sync_max_text_length}"

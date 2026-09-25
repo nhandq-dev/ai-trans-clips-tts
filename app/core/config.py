@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     """Application settings sourced from environment variables and an optional `.env` file.
 
     Environment variable names map to field names case-insensitively, so `APP_ENV` maps to
-    `app_env`, `MAX_TEXT_LENGTH` to `max_text_length`, and so on.
+    `app_env`, `SYNC_MAX_TEXT_LENGTH` to `sync_max_text_length`, and so on.
     """
 
     model_config = SettingsConfigDict(
@@ -35,7 +35,10 @@ class Settings(BaseSettings):
     docs_password: str = ""
 
     # TTS runtime
-    max_text_length: int = 5000
+    # Technical ceiling for a single synchronous `/v1/tts` request: how much text the
+    # single-lane worker can finish before the caller's timeout. This is a capability,
+    # NOT a business limit — per-plan character caps live in the API
+    # (`tts_max_chars_per_request`, plan/015 §5.3).
     sync_max_text_length: int = 2000
     tts_concurrency: int = 2
     tts_format: str = "mp3"
@@ -109,8 +112,6 @@ class Settings(BaseSettings):
                 "DOCS_PASSWORD is required when docs are enabled in production "
                 "(set DOCS_PASSWORD or DISABLE_DOCS=true)"
             )
-        if self.sync_max_text_length > self.max_text_length:
-            raise ValueError("SYNC_MAX_TEXT_LENGTH cannot exceed MAX_TEXT_LENGTH")
         if self.custom_voice_max_seconds <= self.custom_voice_min_seconds:
             raise ValueError("CUSTOM_VOICE_MAX_SECONDS must exceed CUSTOM_VOICE_MIN_SECONDS")
         if self.custom_voice_min_seconds <= 0:
