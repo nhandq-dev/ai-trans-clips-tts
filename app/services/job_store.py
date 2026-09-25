@@ -28,6 +28,9 @@ JOB_COMPLETED = "completed"
 JOB_FAILED = "failed"
 
 QUEUE_KEY = "tts:jobs:queue"
+# Per-tier sets of jobs that are queued or processing, for the Free-pool cap.
+ACTIVE_KEY_PREFIX = "tts:jobs:active:"
+ACTIVE_TIERS = ("free", "paid")
 SEQ_KEY = "tts:jobs:seq"
 JOB_KEY_PREFIX = "tts:job:"
 
@@ -54,6 +57,8 @@ class TtsJob:
     user_id: int | None = None
     #: Higher runs first. User plans use 10..100; the video pipeline reserves 500.
     priority: int = 0
+    #: Billing tier (`free` / `paid`); drives the shared Free-pool cap.
+    tier: str | None = None
     audio_path: str | None = None
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -78,6 +83,7 @@ class TtsJob:
             "text_length": self.text_length,
             "user_id": self.user_id,
             "priority": self.priority,
+            "tier": self.tier,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "started_at": self.started_at,
@@ -111,6 +117,7 @@ def _encode(job: TtsJob) -> dict[str, str]:
         "owner": "" if job.owner is None else str(job.owner),
         "user_id": "" if job.user_id is None else str(job.user_id),
         "priority": str(job.priority),
+        "tier": job.tier or "",
         "audio_path": job.audio_path or "",
         "created_at": f"{job.created_at:.6f}",
         "updated_at": f"{job.updated_at:.6f}",
@@ -155,6 +162,7 @@ def _decode(raw: dict[str, str]) -> TtsJob | None:
         owner=_to_int(raw.get("owner", "")),
         user_id=_to_int(raw.get("user_id", "")),
         priority=_to_int(raw.get("priority", "")) or 0,
+        tier=raw.get("tier") or None,
         audio_path=raw.get("audio_path") or None,
         created_at=_to_float(raw.get("created_at", "")) or 0.0,
         updated_at=_to_float(raw.get("updated_at", "")) or 0.0,
@@ -180,6 +188,12 @@ class JobStore(Protocol):
 
     async def dequeue(self, timeout: int = 5) -> str | None: ...
 
+    async def add_active(self, tier: str, job_id: str) -> None: ...
+
+    async def remove_active(self, tier: str, job_id: str) -> None: ...
+
+    async def count_active(self, tier: str) -> int: ...
+
     async def ping(self) -> bool: ...
 
     async def close(self) -> None: ...
@@ -195,6 +209,7 @@ class MemoryJobStore:
         # Max-heap of (-score, job_id); see SCORE_SCALE for the ordering.
         self._queue: list[tuple[float, str]] = []
         self._seq = 0
+        self._active: dict[str, set[str]] = {}
         self._ttl = ttl_seconds
 
     async def create(self, job: TtsJob) -> TtsJob:
@@ -226,6 +241,15 @@ class MemoryJobStore:
             if time.monotonic() >= deadline:
                 return None
             await asyncio.sleep(0.05)
+
+    async def add_active(self, tier: str, job_id: str) -> None:
+        self._active.setdefault(tier, set()).add(job_id)
+
+    async def remove_active(self, tier: str, job_id: str) -> None:
+        self._active.get(tier, set()).discard(job_id)
+
+    async def count_active(self, tier: str) -> int:
+        return len(self._active.get(tier, set()))
 
     async def ping(self) -> bool:
         return True
@@ -290,6 +314,35 @@ class RedisJobStore:
         if not result:
             return None
         return result[1]
+
+    async def add_active(self, tier: str, job_id: str) -> None:
+        await self._redis.sadd(f"{ACTIVE_KEY_PREFIX}{tier}", job_id)
+
+    async def remove_active(self, tier: str, job_id: str) -> None:
+        await self._redis.srem(f"{ACTIVE_KEY_PREFIX}{tier}", job_id)
+
+    async def count_active(self, tier: str) -> int:
+        """Active jobs of a tier, pruning members whose job already finished.
+
+        A worker that dies mid-job would otherwise leak a slot forever; the set is
+        tiny, so re-checking each member is cheap.
+        """
+        key = f"{ACTIVE_KEY_PREFIX}{tier}"
+        members = await self._redis.smembers(key)
+        if not members:
+            return 0
+        async with self._redis.pipeline(transaction=False) as pipe:
+            for job_id in members:
+                pipe.hget(self._key(job_id), "status")
+            statuses = await pipe.execute()
+        finished = [
+            job_id
+            for job_id, status in zip(members, statuses, strict=True)
+            if status not in (JOB_QUEUED, JOB_PROCESSING)
+        ]
+        if finished:
+            await self._redis.srem(key, *finished)
+        return len(members) - len(finished)
 
     async def ping(self) -> bool:
         try:

@@ -242,6 +242,8 @@ class TranslateRequest(BaseModel):
     # Plan allowance for concurrent jobs; the worker still caps it with
     # MAX_CONCURRENT_PER_USER (plan/015 §5.5).
     max_concurrent_jobs: int | None = Field(default=None, ge=1, le=20)
+    # Plan cap on the source length, enforced once the file is local.
+    max_duration_seconds: int | None = Field(default=None, ge=1, le=86400)
     user_id: str | None = Field(default=None, max_length=64)
     job_id: str | None = Field(default=None, max_length=64)
 
@@ -493,6 +495,7 @@ async def create_translate_job(req: TranslateRequest, request: Request):
         user_id=req.user_id,
         priority=req.priority,
         max_concurrent_jobs=req.max_concurrent_jobs,
+        max_duration_seconds=req.max_duration_seconds,
         request_id=request_id,
         job_id=req.job_id,
     )

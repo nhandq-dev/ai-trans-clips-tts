@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     # because in-process job state is invisible to the other workers.
     redis_url: str | None = None
     tts_job_ttl_seconds: int = 86400
+    # Shared ceiling on active Free-tier jobs (plan/015). Paid tiers are unaffected.
+    tts_free_active_job_limit: int = 10
     # Start the in-process async job consumer. Disabled by tests, and by any
     # deployment that consumes the queue from a separate process.
     tts_jobs_consumer_enabled: bool = True

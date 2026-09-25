@@ -66,6 +66,24 @@ async def create_job(req: TTSRequest) -> dict:
             detail="async TTS requires REDIS_URL when TTS_WORKERS is greater than 1",
         )
 
+    # Shared Free-tier pool: the worker has only a few lanes, so without a ceiling a
+    # rush of free users would queue hours behind each other (plan/015).
+    if req.tier == "free":
+        active = await store.count_active("free")
+        if active >= settings.tts_free_active_job_limit:
+            logger.warning(
+                "free_queue_full active=%d limit=%d", active, settings.tts_free_active_job_limit
+            )
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "FREE_QUEUE_FULL",
+                    "message": (
+                        "The Free queue is full right now. Please try again in a few minutes."
+                    ),
+                },
+            )
+
     voice_data = None
     if req.voice and req.owner is not None:
         voice_data = await asyncio.to_thread(custom_voices.load_voice, req.owner, req.voice)
@@ -83,8 +101,11 @@ async def create_job(req: TTSRequest) -> dict:
         owner=req.owner,
         user_id=req.user_id,
         priority=req.priority,
+        tier=req.tier,
     )
     await store.create(job)
+    if req.tier:
+        await store.add_active(req.tier, job.id)
     await store.enqueue(job.id, req.priority)
     logger.info(
         "job_queued job=%s chars=%d language=%s priority=%d",

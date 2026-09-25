@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
@@ -24,6 +26,8 @@ class TTSRequest(BaseModel):
     # Queue ordering: higher runs first (plan/014 P3.1). User plans use 10..100;
     # the video pipeline reserves 500 so its dubbing is never starved.
     priority: int = Field(default=0, ge=-1000, le=1000)
+    # Billing tier; `free` counts against the shared Free-pool cap.
+    tier: Literal["free", "paid"] | None = Field(default=None)
 
 
 def normalize_format(value: str) -> str:

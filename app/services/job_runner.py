@@ -38,8 +38,20 @@ async def process_job(store: JobStore, job_id: str) -> None:
         return
     if job.status != JOB_QUEUED:
         logger.warning("job_not_queued job=%s status=%s", job_id, job.status)
+        if job.tier:
+            await store.remove_active(job.tier, job_id)
         return
 
+    try:
+        await _run_job(store, job, job_id)
+    finally:
+        # The Free-pool cap counts queued + processing, so the slot is released as
+        # soon as the job reaches a terminal state — including a crash here.
+        if job.tier:
+            await store.remove_active(job.tier, job_id)
+
+
+async def _run_job(store: JobStore, job: TtsJob, job_id: str) -> None:
     await store.update(
         job_id,
         status=JOB_PROCESSING,

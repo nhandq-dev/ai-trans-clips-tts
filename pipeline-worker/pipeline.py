@@ -180,6 +180,21 @@ async def _update(job_id: str, stage: str, progress: int | None = None, **fields
     await jobs.update_job(job_id, stage=stage, progress=progress, **fields)
 
 
+def enforce_max_duration(duration_seconds: float, max_seconds: int | None) -> None:
+    """Reject a source longer than the plan allows (plan/015).
+
+    Checked after the file is local so the message can quote the real length.
+    """
+    if not max_seconds:
+        return
+    if duration_seconds > max_seconds:
+        raise PermanentError(
+            "DURATION_EXCEEDED",
+            f"Video is {duration_seconds / 60:.1f} minutes long but this plan allows "
+            f"at most {max_seconds // 60} minute(s) per job.",
+        )
+
+
 async def run_pipeline(job_id: str):
     """Run all stages for job_id. Called as background task from main.py."""
     job = await jobs.get_job(job_id)
@@ -261,6 +276,15 @@ async def run_pipeline(job_id: str):
             # mark done
             await jobs.update_job(job_id, stage_state={**job.stage_state, "downloading": "done"})
             job = await jobs.get_job(job_id)
+
+            # Enforce the plan's per-job length cap now that the source is local.
+            # Placed here so every source path (S3, local, video-worker) is covered.
+            if getattr(job, "max_duration_seconds", None):
+                try:
+                    info = await probe(source_mp4)
+                except Exception as exc:
+                    raise PermanentError("UNSUPPORTED", f"not a valid video: {exc}") from exc
+                enforce_max_duration(info["duration"], job.max_duration_seconds)
 
         # ------------------------------------------------------------------
         # Stage: extracting

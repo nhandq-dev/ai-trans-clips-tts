@@ -284,6 +284,74 @@ def test_async_jobs_require_redis_when_running_multiple_workers(client, signer, 
     assert "REDIS_URL" in response.json()["error"]
 
 
+def test_free_pool_cap_rejects_when_full(client, signer, monkeypatch):
+    """A shared ceiling keeps free users from queueing hours behind each other."""
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "tts_free_active_job_limit", 1)
+    store = get_job_store()
+
+    async def seed():
+        await store.add_active("free", "already-running")
+
+    asyncio.run(seed())
+
+    full = _post_job(client, signer, {"text": "xin chào", "language": "vi", "tier": "free"})
+    assert full.status_code == 429
+    assert full.json()["error"]["code"] == "FREE_QUEUE_FULL"
+
+    # Paid tiers do not share the free pool.
+    paid = _post_job(client, signer, {"text": "xin chào", "language": "vi", "tier": "paid"})
+    assert paid.status_code == 202
+
+
+def test_free_slot_is_released_when_the_job_finishes(monkeypatch):
+    _fake_synthesis(monkeypatch)
+
+    async def scenario():
+        from app.services.job_runner import process_job
+
+        store = MemoryJobStore()
+        job = new_job(text="xin chào", language="vi", fmt="mp3", tier="free")
+        await store.create(job)
+        await store.add_active("free", job.id)
+        assert await store.count_active("free") == 1
+
+        await process_job(store, job.id)
+        assert await store.count_active("free") == 0
+
+    asyncio.run(scenario())
+
+
+def test_free_slot_is_released_even_when_the_job_fails(monkeypatch):
+    _fake_synthesis(monkeypatch, fail=RuntimeError("boom"))
+
+    async def scenario():
+        from app.services.job_runner import process_job
+
+        store = MemoryJobStore()
+        job = new_job(text="xin chào", language="vi", fmt="mp3", tier="free")
+        await store.create(job)
+        await store.add_active("free", job.id)
+
+        await process_job(store, job.id)
+        assert await store.count_active("free") == 0
+
+    asyncio.run(scenario())
+
+
+def test_job_carries_its_tier(client, signer):
+    payload = _post_job(client, signer, {"text": "hi", "language": "vi", "tier": "free"}).json()
+    assert payload["tier"] == "free"
+
+
+def test_unknown_tier_is_rejected(client, signer):
+    assert (
+        _post_job(client, signer, {"text": "hi", "language": "vi", "tier": "gold"}).status_code
+        == 422
+    )
+
+
 def test_voices_reports_both_ceilings(client, signer):
     """The catalog is the contract the API clamps plan caps against."""
     response = client.get("/v1/voices", headers=signer("GET", "/v1/voices"))
