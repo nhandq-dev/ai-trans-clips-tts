@@ -69,6 +69,11 @@ class Job:
     max_concurrent_jobs: int | None = None
     # Plan cap on the source length; enforced after download (plan/015).
     max_duration_seconds: int | None = None
+    # `free` / `paid`: selects the Gemini key pool (plan/015).
+    gemini_tier: str | None = None
+    # Gemini spend for this job, summed across chunks.
+    gemini_input_tokens: int | None = None
+    gemini_output_tokens: int | None = None
     # progress
     status: JobStatus = "queued"
     stage: Stage = "queued"
@@ -115,6 +120,7 @@ async def create_job(
     priority: int = 0,
     max_concurrent_jobs: int | None = None,
     max_duration_seconds: int | None = None,
+    gemini_tier: str | None = None,
     request_id: str | None = None,
     job_id: str | None = None,
 ) -> Job:
@@ -132,6 +138,7 @@ async def create_job(
         user_id=user_id,
         max_concurrent_jobs=max_concurrent_jobs,
         max_duration_seconds=max_duration_seconds,
+        gemini_tier=gemini_tier,
         request_id=request_id,
     )
     async with _lock:

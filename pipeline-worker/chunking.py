@@ -88,6 +88,7 @@ async def transcribe_chunked(
     source_language: str,
     target_language: str,
     work_dir: str | Path | None = None,
+    tier: str | None = None,
 ) -> TranscriptionResult:
     """Chunk, transcribe each chunk in parallel, merge with offset.
 
@@ -97,7 +98,9 @@ async def transcribe_chunked(
     # quick probe duration
     duration = await _probe_duration(audio_path)
     if duration <= CHUNK_DURATION_SECONDS:
-        return await transcribe_and_translate(audio_path, source_language, target_language)
+        return await transcribe_and_translate(
+            audio_path, source_language, target_language, tier=tier
+        )
 
     # need chunking
     if work_dir is None:
@@ -111,7 +114,7 @@ async def transcribe_chunked(
 
     async def _one(chunk: Path, offset: float) -> TranscriptionResult:
         async with sem:
-            res = await transcribe_and_translate(chunk, source_language, target_language)
+            res = await transcribe_and_translate(chunk, source_language, target_language, tier=tier)
             for seg in res.segments:
                 seg.start += offset
                 seg.end += offset
@@ -135,5 +138,9 @@ async def transcribe_chunked(
         detected_language = results[0].detected_language
 
     return TranscriptionResult(
-        detected_language=detected_language, segments=sorted(all_segments, key=lambda s: s.start)
+        detected_language=detected_language,
+        segments=sorted(all_segments, key=lambda s: s.start),
+        # Token accounting for the whole job, summed over chunks.
+        input_tokens=sum(res.input_tokens for res in results),
+        output_tokens=sum(res.output_tokens for res in results),
     )

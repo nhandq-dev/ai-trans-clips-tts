@@ -309,7 +309,11 @@ async def run_pipeline(job_id: str):
             from schemas import TranscriptionResult
 
             result: TranscriptionResult = await transcribe_chunked(
-                audio_flac, job.source_language, job.target_language, work_dir=work / "chunks"
+                audio_flac,
+                job.source_language,
+                job.target_language,
+                work_dir=work / "chunks",
+                tier=getattr(job, "gemini_tier", None),
             )
             # write outputs
             write_outputs(result, work)
@@ -523,7 +527,14 @@ async def run_pipeline(job_id: str):
                 _info = await _probe(source_mp4)
                 _seconds = int(round(_info.get("duration") or 0))
                 _nseg = len(result.segments) if hasattr(result, "segments") else 0
-                await jobs.update_job(job_id, duration_seconds=_seconds, segments_count=_nseg)
+                await jobs.update_job(
+                    job_id,
+                    duration_seconds=_seconds,
+                    segments_count=_nseg,
+                    # Gemini spend for this job, for per-user accounting (plan/015).
+                    gemini_input_tokens=int(getattr(result, "input_tokens", 0) or 0),
+                    gemini_output_tokens=int(getattr(result, "output_tokens", 0) or 0),
+                )
             except Exception:
                 pass
             # observability: one log line per job (T5.3)

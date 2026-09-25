@@ -21,7 +21,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import jobs as job_store
 from auth import HMACAuthMiddleware, RequestContextMiddleware
@@ -53,6 +53,11 @@ CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))
 QUEUE_MAX_DEPTH = int(os.getenv("QUEUE_MAX_DEPTH", "100"))
 
 logger = logging.getLogger("pipeline-worker")
+
+
+def _split_env_keys(name: str) -> list[str]:
+    return [key.strip() for key in os.getenv(name, "").split(",") if key.strip()]
+
 
 _metrics: dict[str, Any] = {
     "requests": 0,
@@ -244,6 +249,8 @@ class TranslateRequest(BaseModel):
     max_concurrent_jobs: int | None = Field(default=None, ge=1, le=20)
     # Plan cap on the source length, enforced once the file is local.
     max_duration_seconds: int | None = Field(default=None, ge=1, le=86400)
+    # Selects the Gemini key pool: free plans share the free keys (plan/015).
+    gemini_tier: Literal["free", "paid"] | None = Field(default=None)
     user_id: str | None = Field(default=None, max_length=64)
     job_id: str | None = Field(default=None, max_length=64)
 
@@ -290,7 +297,11 @@ async def health():
         "concurrency": CONCURRENCY,
         "work_dir": str(WORK_DIR),
         "signing_configured": bool(parse_keys(HMAC_KEYS_JSON)),
-        "gemini_configured": bool(GEMINI_API_KEY),
+        "gemini_configured": bool(GEMINI_API_KEY or os.getenv("GEMINI_API_KEYS_FREE")),
+        "gemini_keys": {
+            "free": len(_split_env_keys("GEMINI_API_KEYS_FREE")),
+            "paid": len(_split_env_keys("GEMINI_API_KEY_PAID")),
+        },
         "scheduler": scheduler_state,
     }
 
@@ -496,6 +507,7 @@ async def create_translate_job(req: TranslateRequest, request: Request):
         priority=req.priority,
         max_concurrent_jobs=req.max_concurrent_jobs,
         max_duration_seconds=req.max_duration_seconds,
+        gemini_tier=req.gemini_tier,
         request_id=request_id,
         job_id=req.job_id,
     )

@@ -80,7 +80,9 @@ def test_quota_on_one_model_falls_through_to_the_next(monkeypatch, tmp_path):
 
     monkeypatch.setattr(gemini, "DEFAULT_MODEL", "m1")
     monkeypatch.setattr(gemini, "FALLBACK_MODELS", ["m2", "m3"])
-    monkeypatch.setattr(gemini, "_client", lambda: object())
+    # The key pool must be non-empty, and `_client` now takes the key it builds for.
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(gemini, "_client", lambda api_key: object())
 
     calls: list[str] = []
 

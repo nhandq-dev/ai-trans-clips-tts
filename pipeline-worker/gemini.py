@@ -39,10 +39,29 @@ FALLBACK_MODELS = [
 ]
 
 
-def _client() -> genai.Client:
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+def _split_keys(value: str) -> list[str]:
+    return [key.strip() for key in (value or "").split(",") if key.strip()]
+
+
+def key_pool(tier: str | None = None) -> list[str]:
+    """API keys for a billing tier (plan/015).
+
+    Free plans share a pool of free-tier keys; paid plans use the paid key(s).
+    Both fall back to the legacy single `GEMINI_API_KEY`, so a deployment keeps
+    working before the pools are filled in.
+    """
+    if tier == "free":
+        keys = _split_keys(os.getenv("GEMINI_API_KEYS_FREE", ""))
+    elif tier == "paid":
+        keys = _split_keys(os.getenv("GEMINI_API_KEY_PAID", ""))
+    else:
+        keys = []
+    return keys or _split_keys(os.getenv("GEMINI_API_KEY", ""))
+
+
+def _client(api_key: str) -> genai.Client:
     if not api_key:
-        raise PermanentError(GEMINI_NOT_CONFIGURED, "GEMINI_API_KEY is not configured")
+        raise PermanentError(GEMINI_NOT_CONFIGURED, "no Gemini API key is configured")
     return genai.Client(api_key=api_key)
 
 
@@ -138,22 +157,34 @@ async def _call_once(
                     err_cls = _classify_genai_error(exc)
                     raise err_cls(GEMINI_FAILED, str(exc)) from exc
 
+                usage = getattr(resp, "usage_metadata", None)
+                input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+                output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+
                 # SDK returns .parsed when response_schema is set
+                result = None
                 if hasattr(resp, "parsed") and resp.parsed is not None:
                     parsed = resp.parsed
-                    if isinstance(parsed, TranscriptionResult):
-                        return parsed
-                    return TranscriptionResult.model_validate(parsed)
-                # Fallback: parse text
-                import json
+                    result = (
+                        parsed
+                        if isinstance(parsed, TranscriptionResult)
+                        else TranscriptionResult.model_validate(parsed)
+                    )
+                else:
+                    # Fallback: parse text
+                    import json
 
-                try:
-                    data = json.loads(resp.text)  # type: ignore[union-attr]
-                    return TranscriptionResult.model_validate(data)
-                except Exception as exc:
-                    raise TransientError(
-                        GEMINI_FAILED, f"invalid json from {model}: {exc}"
-                    ) from exc
+                    try:
+                        data = json.loads(resp.text)  # type: ignore[union-attr]
+                        result = TranscriptionResult.model_validate(data)
+                    except Exception as exc:
+                        raise TransientError(
+                            GEMINI_FAILED, f"invalid json from {model}: {exc}"
+                        ) from exc
+
+                result.input_tokens = input_tokens
+                result.output_tokens = output_tokens
+                return result
         raise TransientError(GEMINI_FAILED, f"exhausted retries for {model}")
 
     return await asyncio.to_thread(_do)
@@ -163,11 +194,14 @@ async def transcribe_and_translate(
     audio_path: str | Path,
     source_language: str = "auto",
     target_language: str = "vi",
+    tier: str | None = None,
 ) -> TranscriptionResult:
     """Transcribe + translate a single audio chunk (FLAC 16k mono).
 
-    Tries ``GEMINI_MODEL`` then ``GEMINI_FALLBACK_MODELS`` in order. Raises
-    ``GEMINI_FAILED`` if all models fail.
+    Tries ``GEMINI_MODEL`` then ``GEMINI_FALLBACK_MODELS`` in order and, within each
+    model, every key of the caller's tier — quotas are per key *and* model, so a free
+    pool multiplies the usable free quota (plan/015). Raises ``GEMINI_FAILED`` if
+    every attempt fails.
     """
     audio_path = Path(audio_path)
     if not audio_path.exists():
@@ -186,6 +220,9 @@ async def transcribe_and_translate(
             if _cached:
                 try:
                     _res = TranscriptionResult.model_validate_json(_cached)
+                    # A cache hit costs nothing, so it must not report tokens.
+                    _res.input_tokens = 0
+                    _res.output_tokens = 0
                     logger.info("gemini cache hit model=%s", _model)
                     return _res
                 except Exception:
@@ -193,17 +230,25 @@ async def transcribe_and_translate(
     except Exception:
         pass
 
-    client = _client()
+    keys = key_pool(tier)
+    if not keys:
+        raise PermanentError(GEMINI_NOT_CONFIGURED, "GEMINI_API_KEY is not configured")
     prompt = _prompt(source_language, target_language)
     models = [DEFAULT_MODEL] + [m for m in FALLBACK_MODELS if m != DEFAULT_MODEL]
+    # Keys inner: burn every key's quota on the primary model before falling back.
+    attempts = [(model, key) for model in models for key in keys]
 
     last_exc: Exception | None = None
-    for model in models:
+    for model, api_key in attempts:
         try:
             logger.info(
-                "gemini call model=%s source=%s target=%s", model, source_language, target_language
+                "gemini call model=%s key=%s source=%s target=%s",
+                model,
+                api_key[-4:],
+                source_language,
+                target_language,
             )
-            result = await _call_once(client, model, audio_bytes, prompt)
+            result = await _call_once(_client(api_key), model, audio_bytes, prompt)
             # Post-processing: sort, drop empty, merge <0.4s (plan/009 T1.2)
             from segments import normalize_segments
 
@@ -222,14 +267,21 @@ async def transcribe_and_translate(
             return result
         except QuotaExhaustedError as exc:
             logger.warning(
-                "gemini quota exhausted model=%s: %s — trying next model", model, exc.message
+                "gemini quota exhausted model=%s key=%s: %s — trying next",
+                model,
+                api_key[-4:],
+                exc.message,
             )
             last_exc = exc
             continue
         except PermanentError as exc:
-            logger.warning("gemini permanent error model=%s: %s", model, exc.message)
+            # Another key (or model) may still work, so keep going; the last error is
+            # raised once every attempt is exhausted.
+            logger.warning(
+                "gemini permanent error model=%s key=%s: %s", model, api_key[-4:], exc.message
+            )
             last_exc = exc
-            break
+            continue
         except TransientError as exc:
             logger.warning(
                 "gemini transient error model=%s: %s — trying fallback", model, exc.message

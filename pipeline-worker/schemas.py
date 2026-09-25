@@ -15,6 +15,10 @@ class Segment(BaseModel):
 class TranscriptionResult(BaseModel):
     detected_language: str = Field(..., min_length=2, max_length=10)
     segments: list[Segment] = Field(default_factory=list)
+    # Token accounting for the job (summed across chunks). `exclude=True` keeps them
+    # out of both the Gemini response schema and the on-disk cache.
+    input_tokens: int = Field(default=0, exclude=True)
+    output_tokens: int = Field(default=0, exclude=True)
 
 
 class TTSClip(BaseModel):
