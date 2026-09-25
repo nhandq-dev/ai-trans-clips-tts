@@ -15,8 +15,12 @@ os.environ["HMAC_KEYS_JSON"] = '{"test-key":"test-secret"}'
 os.environ.setdefault("HMAC_MAX_SKEW_SECONDS", "60")
 os.environ.setdefault("HMAC_NONCE_TTL_SECONDS", "300")
 os.environ.setdefault("SYNC_MAX_TEXT_LENGTH", "2000")
+os.environ.setdefault("ASYNC_MAX_TEXT_LENGTH", "30000")
 os.environ.setdefault("TTS_CONCURRENCY", "1")
 os.environ.setdefault("ACCESS_LOG_ENABLED", "false")
+# The job consumer is exercised directly in tests; letting it run would load the
+# real VieNeu model on every enqueue.
+os.environ["TTS_JOBS_CONSUMER_ENABLED"] = "false"
 
 TEST_KEY_ID = "test-key"
 TEST_SECRET = "test-secret"

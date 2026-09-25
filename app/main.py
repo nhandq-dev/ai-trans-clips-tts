@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 
-from app.api.routes import custom_voices, health, tts, voices
+from app.api.routes import custom_voices, health, jobs, tts, voices
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import DocsAuthMiddleware, HMACAuthMiddleware, RequestContextMiddleware
+from app.services import job_runner
+from app.services.job_store import get_job_store
 from app.services.synthesis import warm_up
 
 settings = get_settings()
@@ -32,7 +34,23 @@ async def lifespan(app: FastAPI):
             logger.info("warmup_finished")
         except Exception:
             logger.exception("warmup_failed")
-    yield
+
+    # One consumer per uvicorn worker: the number of concurrent syntheses equals
+    # TTS_WORKERS, matching the synchronous path's lanes.
+    consumer: asyncio.Task | None = None
+    store = get_job_store()
+    if settings.tts_jobs_consumer_enabled:
+        if not await store.ping():
+            logger.error("job_store_unavailable: async TTS jobs will not be processed")
+        consumer = asyncio.create_task(job_runner.consume_forever(store))
+    try:
+        yield
+    finally:
+        if consumer is not None:
+            consumer.cancel()
+            with suppress(asyncio.CancelledError):
+                await consumer
+        await store.close()
 
 
 app = FastAPI(
@@ -53,6 +71,7 @@ app.include_router(health.router)
 app.include_router(voices.router)
 app.include_router(custom_voices.router)
 app.include_router(tts.router)
+app.include_router(jobs.router)
 
 
 if __name__ == "__main__":

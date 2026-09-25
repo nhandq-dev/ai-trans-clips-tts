@@ -47,6 +47,18 @@ class Settings(BaseSettings):
     # Requests admitted per process before queueing. Total in-flight is
     # `tts_workers * tts_concurrency`, but only one synthesis runs per process.
     tts_concurrency: int = 2
+    # Async job path (plan/014 Phase 1).
+    # Ceiling for one async request. Unlike `sync_max_text_length` this is not a
+    # capability bound — the job is decoupled from the HTTP request, so it can be
+    # as large as the per-plan caps the API enforces.
+    async_max_text_length: int = 30000
+    # Redis backs the shared job store + queue. Required once `tts_workers > 1`,
+    # because in-process job state is invisible to the other workers.
+    redis_url: str | None = None
+    tts_job_ttl_seconds: int = 86400
+    # Start the in-process async job consumer. Disabled by tests, and by any
+    # deployment that consumes the queue from a separate process.
+    tts_jobs_consumer_enabled: bool = True
     tts_format: str = "mp3"
     tts_output_dir: Path = Path("tts_output")
     hf_home: Path | None = None

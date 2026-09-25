@@ -1,8 +1,30 @@
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Loopback only: the job store is internal to the workers.
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   tts-worker:
     image: ghcr.io/nhandq-dev/tts-worker:${IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8004:8004"
     volumes:

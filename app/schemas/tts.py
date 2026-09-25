@@ -18,17 +18,23 @@ class TTSRequest(BaseModel):
     voice: str | None = Field(default=None, max_length=100)
     format: str = Field(default_factory=lambda: get_settings().tts_format)
     owner: int | None = Field(default=None, ge=1)
+    # Requesting user id. Only used by the async path, where the API asserts the
+    # poller owns the job it asks about.
+    user_id: int | None = Field(default=None, ge=1)
 
 
 def normalize_format(value: str) -> str:
     return value.lower().lstrip(".")
 
 
-def validate_tts_request(req: TTSRequest, *, custom_voice: bool = False) -> str:
+def validate_tts_request(
+    req: TTSRequest, *, custom_voice: bool = False, async_job: bool = False
+) -> str:
     """Validate a request and return the normalized format.
 
     Set `custom_voice=True` when `req.voice` is a registered cloned voice so the
-    catalog membership check is skipped.
+    catalog membership check is skipped. Set `async_job=True` for the queued path,
+    which is not bound by the synchronous ceiling.
 
     Raises `TTSValidationError` for anything the caller can fix; the route maps that to a 400.
     """
@@ -42,10 +48,10 @@ def validate_tts_request(req: TTSRequest, *, custom_voice: bool = False) -> str:
         raise TTSValidationError("format must be 'mp3' or 'wav'")
 
     text_length = len(req.text)
-    if text_length > settings.sync_max_text_length:
-        raise TTSValidationError(
-            f"text exceeds the synchronous limit of {settings.sync_max_text_length}"
-        )
+    limit = settings.async_max_text_length if async_job else settings.sync_max_text_length
+    if text_length > limit:
+        mode = "asynchronous" if async_job else "synchronous"
+        raise TTSValidationError(f"text exceeds the {mode} limit of {limit}")
 
     if custom_voice:
         if req.language.strip().lower().split("-")[0] != "vi":

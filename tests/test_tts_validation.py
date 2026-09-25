@@ -34,9 +34,14 @@ def test_text_over_sync_limit_rejected(client, signer):
     assert "synchronous" in response.json()["error"]
 
 
-def test_text_over_max_limit_rejected(client, signer):
-    response = _post(client, signer, {"text": "a" * 6000})
+def test_text_over_async_limit_rejected(client, signer):
+    """The queued path has its own ceiling (`ASYNC_MAX_TEXT_LENGTH`)."""
+    body = json.dumps({"text": "a" * 30001}).encode()
+    headers = signer("POST", "/v1/tts/jobs", body)
+    headers["Content-Type"] = "application/json"
+    response = client.post("/v1/tts/jobs", content=body, headers=headers)
     assert response.status_code == 400
+    assert "asynchronous" in response.json()["error"]
 
 
 def test_malformed_json_rejected(client, signer):
