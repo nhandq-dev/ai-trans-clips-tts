@@ -64,6 +64,9 @@ class Job:
     idempotency_key: str | None = None
     user_id: str | None = None
     priority: int = 0
+    # Per-plan concurrent job allowance (plan/015). The env ceiling still applies;
+    # the scheduler uses the smaller of the two.
+    max_concurrent_jobs: int | None = None
     # progress
     status: JobStatus = "queued"
     stage: Stage = "queued"
@@ -108,6 +111,7 @@ async def create_job(
     idempotency_key: str | None = None,
     user_id: str | None = None,
     priority: int = 0,
+    max_concurrent_jobs: int | None = None,
     request_id: str | None = None,
     job_id: str | None = None,
 ) -> Job:
@@ -123,6 +127,7 @@ async def create_job(
         priority=priority,
         idempotency_key=idempotency_key,
         user_id=user_id,
+        max_concurrent_jobs=max_concurrent_jobs,
         request_id=request_id,
     )
     async with _lock:

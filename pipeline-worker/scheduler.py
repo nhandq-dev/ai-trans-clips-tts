@@ -121,9 +121,20 @@ class Scheduler:
             if job.job_id in self._tasks:
                 continue
             user_key = str(job.user_id or "anon")
-            if self._running_per_user.get(user_key, 0) >= self._max_per_user:
+            if self._running_per_user.get(user_key, 0) >= self._user_limit(job):
                 continue
             self._start(job)
+
+    def _user_limit(self, job: Job) -> int:
+        """How many jobs this user may run at once.
+
+        The env ceiling protects the box; the plan's `concurrentJobsLimit` (sent by
+        the API) protects the queue from one user taking every slot. The smaller
+        wins, so a plan can never exceed the system ceiling.
+        """
+        if job.max_concurrent_jobs and job.max_concurrent_jobs > 0:
+            return min(self._max_per_user, job.max_concurrent_jobs)
+        return self._max_per_user
 
     def _start(self, job: Job) -> None:
         user_key = str(job.user_id or "anon")

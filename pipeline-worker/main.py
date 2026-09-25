@@ -239,6 +239,9 @@ class TranslateRequest(BaseModel):
     voice: str | None = Field(default=None, max_length=100)
     options: TranslateOptions = Field(default_factory=TranslateOptions)
     priority: int = Field(default=0, ge=-100, le=100)
+    # Plan allowance for concurrent jobs; the worker still caps it with
+    # MAX_CONCURRENT_PER_USER (plan/015 §5.5).
+    max_concurrent_jobs: int | None = Field(default=None, ge=1, le=20)
     user_id: str | None = Field(default=None, max_length=64)
     job_id: str | None = Field(default=None, max_length=64)
 
@@ -489,6 +492,7 @@ async def create_translate_job(req: TranslateRequest, request: Request):
         idempotency_key=idempotency_key,
         user_id=req.user_id,
         priority=req.priority,
+        max_concurrent_jobs=req.max_concurrent_jobs,
         request_id=request_id,
         job_id=req.job_id,
     )

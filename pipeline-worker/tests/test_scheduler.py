@@ -68,6 +68,67 @@ def test_respects_per_user_concurrency():
     assert a1.job_id in running or a2.job_id in running
 
 
+def test_plan_concurrency_limit_narrows_the_per_user_ceiling():
+    """A Free job carries max_concurrent_jobs=1, so it cannot take two slots."""
+
+    async def runner(job_id: str) -> None:
+        await asyncio.sleep(0.2)
+
+    async def scenario():
+        # Box ceiling is 2, but this user's plan allows only 1.
+        scheduler = Scheduler(runner, concurrency=10, max_concurrent_per_user=2)
+        free1 = await jobs.create_job(source_url="http://a/1", user_id="u1", max_concurrent_jobs=1)
+        free2 = await jobs.create_job(source_url="http://a/2", user_id="u1", max_concurrent_jobs=1)
+        paid1 = await jobs.create_job(source_url="http://a/3", user_id="u2", max_concurrent_jobs=2)
+        paid2 = await jobs.create_job(source_url="http://a/4", user_id="u2", max_concurrent_jobs=2)
+        await scheduler._dispatch_once()
+        running = set(scheduler._tasks.keys())
+        for task in list(scheduler._tasks.values()):
+            task.cancel()
+        return free1, free2, paid1, paid2, running
+
+    free1, free2, paid1, paid2, running = asyncio.run(scenario())
+    assert len(running) == 3
+    # Free (1): exactly one of its two jobs.
+    assert len({free1.job_id, free2.job_id} & running) == 1
+    # Pro (2): both run.
+    assert {paid1.job_id, paid2.job_id} <= running
+
+
+def test_plan_limit_cannot_exceed_the_env_ceiling():
+    async def runner(job_id: str) -> None:
+        await asyncio.sleep(0.2)
+
+    async def scenario():
+        scheduler = Scheduler(runner, concurrency=10, max_concurrent_per_user=1)
+        await jobs.create_job(source_url="http://a/1", user_id="u1", max_concurrent_jobs=3)
+        await jobs.create_job(source_url="http://a/2", user_id="u1", max_concurrent_jobs=3)
+        await scheduler._dispatch_once()
+        running = set(scheduler._tasks.keys())
+        for task in list(scheduler._tasks.values()):
+            task.cancel()
+        return running
+
+    assert len(asyncio.run(scenario())) == 1
+
+
+def test_missing_plan_limit_falls_back_to_the_env_ceiling():
+    async def runner(job_id: str) -> None:
+        await asyncio.sleep(0.2)
+
+    async def scenario():
+        scheduler = Scheduler(runner, concurrency=10, max_concurrent_per_user=2)
+        await jobs.create_job(source_url="http://a/1", user_id="u1")
+        await jobs.create_job(source_url="http://a/2", user_id="u1")
+        await scheduler._dispatch_once()
+        running = set(scheduler._tasks.keys())
+        for task in list(scheduler._tasks.values()):
+            task.cancel()
+        return running
+
+    assert len(asyncio.run(scenario())) == 2
+
+
 def test_dispatch_loop_survives_the_poll_timeout(monkeypatch):
     """Regression: the loop used to die on the first idle poll.
 
