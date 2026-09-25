@@ -12,7 +12,9 @@
 set -e
 
 workers="${TTS_WORKERS:-1}"
-cores="$(nproc 2>/dev/null || echo 1)"
+# NB: `nproc` honours OMP_NUM_THREADS, so with that variable set it reports the
+# thread cap instead of the core count. `getconf`/`/proc/cpuinfo` do not.
+cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)"
 threads="${OMP_NUM_THREADS:-$(( cores / workers ))}"
 [ "$threads" -lt 1 ] && threads=1
 
