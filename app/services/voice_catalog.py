@@ -435,4 +435,19 @@ def is_valid_voice(voice: str, language: str) -> bool:
 
 
 def catalog() -> dict:
-    return {"languages": LANGUAGES, "voices": VOICES}
+    """Voice catalog plus the effective text limits.
+
+    Clients must read the limits from here instead of hardcoding them: the sync
+    cap depends on worker config (`SYNC_MAX_TEXT_LENGTH`), not on the client.
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    return {
+        "languages": LANGUAGES,
+        "voices": VOICES,
+        "limits": {
+            "syncMaxTextLength": settings.sync_max_text_length,
+            "maxTextLength": settings.max_text_length,
+        },
+    }

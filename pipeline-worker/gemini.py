@@ -10,7 +10,13 @@ import logging
 import os
 from pathlib import Path
 
-from errors import GEMINI_FAILED, GEMINI_NOT_CONFIGURED, PermanentError, TransientError
+from errors import (
+    GEMINI_FAILED,
+    GEMINI_NOT_CONFIGURED,
+    PermanentError,
+    QuotaExhaustedError,
+    TransientError,
+)
 from google import genai
 from google.genai import types
 from schemas import TranscriptionResult
@@ -64,7 +70,7 @@ def _prompt(source_language: str, target_language: str) -> str:
 _QUOTA_MARKERS = ("quota", "resource_exhausted", "billing", "exceeded your current")
 
 
-def _classify_genai_error(exc: Exception) -> type[TransientError] | type[PermanentError]:
+def _classify_genai_error(exc: Exception) -> type[Exception]:
     """Map genai SDK errors to transient/permanent for tenacity.
 
     Permanent errors fail immediately with a precise code; only genuinely
@@ -73,9 +79,9 @@ def _classify_genai_error(exc: Exception) -> type[TransientError] | type[Permane
     msg = str(exc).lower()
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
 
-    # Quota / billing: a 429 that will not clear within this job's lifetime.
+    # Quota / billing is per model: skip its retries but still try the next model.
     if any(marker in msg for marker in _QUOTA_MARKERS):
-        return PermanentError
+        return QuotaExhaustedError
     # Rate limit, high demand, timeout, 5xx are transient.
     if status in (429, 500, 502, 503, 504) or any(
         s in msg
@@ -214,6 +220,12 @@ async def transcribe_and_translate(
             except Exception:
                 pass
             return result
+        except QuotaExhaustedError as exc:
+            logger.warning(
+                "gemini quota exhausted model=%s: %s — trying next model", model, exc.message
+            )
+            last_exc = exc
+            continue
         except PermanentError as exc:
             logger.warning("gemini permanent error model=%s: %s", model, exc.message)
             last_exc = exc
@@ -233,6 +245,10 @@ async def transcribe_and_translate(
     # request) must not be reported as retryable, or the API would keep the job
     # alive and the UI would sit in `transcribing` with no explanation.
     detail = getattr(last_exc, "message", None) or str(last_exc)
+    if isinstance(last_exc, QuotaExhaustedError):
+        raise QuotaExhaustedError(
+            GEMINI_FAILED, f"every gemini model is out of quota: {detail}"
+        ) from last_exc
     if isinstance(last_exc, PermanentError):
         raise PermanentError(GEMINI_FAILED, f"gemini failed: {detail}") from last_exc
     raise TransientError(GEMINI_FAILED, f"all gemini models failed: {detail}") from last_exc

@@ -43,6 +43,10 @@ for _ in $(seq 1 "${MAX_ATTEMPTS}"); do
 	if curl -fsS "${READY_URL}" >/dev/null 2>&1; then
 		printf '%s\n' "${IMAGE_TAG}" > "${CURRENT_TAG_FILE}"
 		echo "Deploy succeeded: ${IMAGE_TAG}"
+		# Reclaim disk: each tts-worker image is ~3GB, keep only the running ones.
+		docker image prune -a -f >/dev/null 2>&1 || true
+		docker builder prune -f >/dev/null 2>&1 || true
+		journalctl --vacuum-size=200M >/dev/null 2>&1 || true
 		exit 0
 	fi
 	sleep "${SLEEP_SECONDS}"

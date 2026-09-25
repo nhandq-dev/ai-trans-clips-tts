@@ -23,6 +23,15 @@ class PermanentError(PipelineError):
     """Not retryable: 400, 422, invalid input."""
 
 
+class QuotaExhaustedError(PermanentError):
+    """Gemini quota/billing exhausted for THIS model.
+
+    Retrying the same model is pointless, but other models have their own budget,
+    so the caller should move straight to the next model instead of failing the
+    job or burning retries.
+    """
+
+
 # Concrete codes (plan/009 §5.4)
 DOWNLOAD_FAILED = "DOWNLOAD_FAILED"
 NO_AUDIO_TRACK = "NO_AUDIO_TRACK"
