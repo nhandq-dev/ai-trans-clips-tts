@@ -98,9 +98,7 @@ async def transcribe_chunked(
     # quick probe duration
     duration = await _probe_duration(audio_path)
     if duration <= CHUNK_DURATION_SECONDS:
-        return await transcribe_and_translate(
-            audio_path, source_language, target_language, tier=tier
-        )
+        return await transcribe_and_translate(audio_path, target_language, tier=tier)
 
     # need chunking
     if work_dir is None:
@@ -114,7 +112,7 @@ async def transcribe_chunked(
 
     async def _one(chunk: Path, offset: float) -> TranscriptionResult:
         async with sem:
-            res = await transcribe_and_translate(chunk, source_language, target_language, tier=tier)
+            res = await transcribe_and_translate(chunk, target_language, tier=tier)
             for seg in res.segments:
                 seg.start += offset
                 seg.end += offset

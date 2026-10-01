@@ -15,6 +15,8 @@ def normalize_segments(segments: list[Segment], *, min_duration: float = 0.4) ->
     """Sort, drop empty, merge short segments. Returns a new list."""
     # drop empty
     segs = [s for s in segments if s.source_text.strip() and s.target_text.strip()]
+    # drop malformed segments (end <= start) so alignment never sees a negative slot
+    segs = [s for s in segs if s.end > s.start]
     if not segs:
         return []
     # sort
