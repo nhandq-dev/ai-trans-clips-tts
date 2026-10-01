@@ -86,9 +86,11 @@ def _prompt(target_language: str, context: str = "", glossary: str = "") -> str:
     )
 
 
-def _to_sec(ts: str) -> float:
-    """Convert MM:SS.d or HH:MM:SS.d to seconds."""
-    parts = ts.split(":")
+def _to_sec(ts: str | int | float) -> float:
+    """Convert MM:SS.d or HH:MM:SS.d (or a plain seconds number) to seconds."""
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    parts = str(ts).split(":")
     if len(parts) == 2:
         m, s = parts
         return int(m) * 60 + float(s)
