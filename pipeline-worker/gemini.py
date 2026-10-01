@@ -66,13 +66,29 @@ def _client(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def _prompt(target_language: str, context: str = "", glossary: str = "") -> str:
+def _prompt(
+    source_language: str = "auto",
+    target_language: str = "vi",
+    context: str = "",
+    glossary: str = "",
+) -> str:
+    src = (
+        f"Source language is '{source_language}'."
+        if source_language and source_language != "auto"
+        else "Detect the source language."
+    )
     return (
-        f"Target language: {target_language}.\n"
+        f"{src} Target language: {target_language}.\n"
         f"Topic/tone: {context or 'general'}. Glossary: {glossary or 'none'}.\n"
         "Transcribe the audio and translate it.\n"
         'Output JSON only: {"lang":"<ISO code or unknown>",'
         '"s":[[start,end,"original","translation"],...]}\n'
+        "Localize for the target audience:\n"
+        "- Resolve ambiguous references explicitly. E.g. when the source is zh-CN, "
+        'the speaker says "my country", translate it as "my country China"; '
+        '"our currency" as the target currency with amounts converted '
+        "(e.g. RMB -> VND/USD).\n"
+        "- Clarify proper nouns, units and culture-specific terms for the target language.\n"
         "Timing:\n"
         '- start/end are strings "MM:SS.d" relative to the start of this clip.\n'
         "- start = first word begins; end = last word ends. Exclude silence, music, pauses.\n"
@@ -219,6 +235,7 @@ async def _call_once(
 
 async def transcribe_and_translate(
     audio_path: str | Path,
+    source_language: str = "auto",
     target_language: str = "vi",
     context: str = "",
     glossary: str = "",
@@ -243,7 +260,7 @@ async def transcribe_and_translate(
         from cache import gemini_cache_key, get_cache, put_cache
 
         for _model in [DEFAULT_MODEL] + [m for m in FALLBACK_MODELS if m != DEFAULT_MODEL]:
-            _key = gemini_cache_key(audio_bytes, "auto", target_language, _model)
+            _key = gemini_cache_key(audio_bytes, source_language, target_language, _model)
             _cached = get_cache(_key)
             if _cached:
                 try:
@@ -273,7 +290,7 @@ async def transcribe_and_translate(
                 api_key[-4:],
                 target_language,
             )
-            prompt = _prompt(target_language)
+            prompt = _prompt(source_language, target_language)
             lang, segments = await _call_once(_client(api_key), model, audio_bytes, prompt)
 
             # Post-processing: sort, drop empty, merge <0.4s (plan/009 T1.2)
@@ -289,7 +306,7 @@ async def transcribe_and_translate(
                 from cache import gemini_cache_key, put_cache
 
                 put_cache(
-                    gemini_cache_key(audio_bytes, "auto", target_language, model),
+                    gemini_cache_key(audio_bytes, source_language, target_language, model),
                     result.model_dump_json().encode(),
                 )
             except Exception:
