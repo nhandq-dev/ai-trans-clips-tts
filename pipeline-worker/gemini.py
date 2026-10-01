@@ -6,6 +6,7 @@ model fallback and tenacity retry for transient errors (429/503/timeout).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ from errors import (
 )
 from google import genai
 from google.genai import types
-from schemas import TranscriptionResult
+from schemas import Segment, TranscriptionResult
 from tenacity import (
     retry_if_exception_type,
     stop_after_attempt,
@@ -65,22 +66,36 @@ def _client(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-def _prompt(source_language: str, target_language: str) -> str:
-    src = (
-        f"Source language is '{source_language}'."
-        if source_language != "auto"
-        else "Detect the source language."
-    )
+def _prompt(target_language: str, context: str = "", glossary: str = "") -> str:
     return (
-        f"{src} Target language is '{target_language}'.\n"
-        "Listen to the audio and return a JSON object with:\n"
-        "- detected_language: the source language code (e.g. en, vi, zh)\n"
-        "- segments: list of {start, end, source_text, target_text} where\n"
-        "  start/end are seconds (float), source_text is verbatim transcript\n"
-        "  in the source language, target_text is translation in target language.\n"
-        "Rules: sort by start, drop empty, do not hallucinate. "
-        "If silent/no speech, return detected_language='unknown' and segments=[]."
+        f"Target language: {target_language}.\n"
+        f"Topic/tone: {context or 'general'}. Glossary: {glossary or 'none'}.\n"
+        "Transcribe the audio and translate it.\n"
+        'Output JSON only: {"lang":"<ISO code or unknown>",'
+        '"s":[[start,end,"original","translation"],...]}\n'
+        "Timing:\n"
+        '- start/end are strings "MM:SS.d" relative to the start of this clip.\n'
+        "- start = first word begins; end = last word ends. Exclude silence, music, pauses.\n"
+        "- Sorted by start. No overlap (end <= next start). Gaps are allowed.\n"
+        "- One sentence/phrase per segment, 1-7 seconds; split long sentences at natural pauses.\n"
+        "Content:\n"
+        '- "original": verbatim speech in the source language. Only audible speech; '
+        'never invent text; use "[?]" if unclear.\n'
+        f'- "translation": natural {target_language}, max ~42 chars/line, follow the glossary.\n'
+        'No speech: {"lang":"unknown","s":[]}'
     )
+
+
+def _to_sec(ts: str) -> float:
+    """Convert MM:SS.d or HH:MM:SS.d to seconds."""
+    parts = ts.split(":")
+    if len(parts) == 2:
+        m, s = parts
+        return int(m) * 60 + float(s)
+    if len(parts) == 3:
+        h, m, s = parts
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    raise ValueError(f"invalid time format: {ts}")
 
 
 #: Exhausted quota is not worth retrying: a per-day/per-project limit will not
@@ -122,17 +137,17 @@ async def _call_once(
     audio_bytes: bytes,
     prompt: str,
     mime_type: str = "audio/flac",
-) -> TranscriptionResult:
+) -> tuple[str, list[Segment]]:
     """Single model call with tenacity retry for transient blips on that model."""
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
-        response_schema=TranscriptionResult,
+        # We don't use response_schema here; we parse JSON manually for the new format
         temperature=0.2,
     )
     # google-genai is sync; run in thread so we don't block the event loop
     import asyncio
 
-    def _do() -> TranscriptionResult:
+    def _do() -> tuple[str, list[Segment]]:
         # Retry transient errors on this model with backoff
         # We use a sync tenacity loop here (not async) because the SDK is sync.
         from tenacity import Retrying
@@ -148,7 +163,7 @@ async def _call_once(
                     resp = client.models.generate_content(
                         model=model,
                         contents=[
-                            types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+                            types.Part.from_bytes(data=audio_bytes, mime_type="audio/flac"),
                             prompt,
                         ],
                         config=config,
@@ -158,33 +173,43 @@ async def _call_once(
                     raise err_cls(GEMINI_FAILED, str(exc)) from exc
 
                 usage = getattr(resp, "usage_metadata", None)
-                input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
-                output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+                _ = int(getattr(usage, "prompt_token_count", 0) or 0)
+                _ = int(getattr(usage, "candidates_token_count", 0) or 0)
 
-                # SDK returns .parsed when response_schema is set
-                result = None
-                if hasattr(resp, "parsed") and resp.parsed is not None:
-                    parsed = resp.parsed
-                    result = (
-                        parsed
-                        if isinstance(parsed, TranscriptionResult)
-                        else TranscriptionResult.model_validate(parsed)
-                    )
-                else:
-                    # Fallback: parse text
-                    import json
+                # Parse JSON response (new format)
+                text = resp.text  # type: ignore[union-attr]
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise TransientError(
+                        GEMINI_FAILED, f"invalid json from {model}: {exc}"
+                    ) from exc
 
+                segs_raw = data.get("s", [])
+                segments: list[Segment] = []
+                for item in segs_raw:
+                    if not isinstance(item, (list, tuple)) or len(item) < 4:
+                        continue
+                    start_ts, end_ts, original, translation = item[:4]
+                    if not original.strip() or not translation.strip():
+                        continue
                     try:
-                        data = json.loads(resp.text)  # type: ignore[union-attr]
-                        result = TranscriptionResult.model_validate(data)
-                    except Exception as exc:
-                        raise TransientError(
-                            GEMINI_FAILED, f"invalid json from {model}: {exc}"
-                        ) from exc
+                        start = _to_sec(start_ts)
+                        end = _to_sec(end_ts)
+                    except ValueError:
+                        continue
+                    if end <= start:
+                        continue
+                    segments.append(
+                        Segment(
+                            start=start,
+                            end=end,
+                            source_text=original.strip(),
+                            target_text=translation.strip(),
+                        )
+                    )
 
-                result.input_tokens = input_tokens
-                result.output_tokens = output_tokens
-                return result
+                return data.get("lang", "unknown"), segments
         raise TransientError(GEMINI_FAILED, f"exhausted retries for {model}")
 
     return await asyncio.to_thread(_do)
@@ -192,8 +217,9 @@ async def _call_once(
 
 async def transcribe_and_translate(
     audio_path: str | Path,
-    source_language: str = "auto",
     target_language: str = "vi",
+    context: str = "",
+    glossary: str = "",
     tier: str | None = None,
 ) -> TranscriptionResult:
     """Transcribe + translate a single audio chunk (FLAC 16k mono).
@@ -215,12 +241,11 @@ async def transcribe_and_translate(
         from cache import gemini_cache_key, get_cache, put_cache
 
         for _model in [DEFAULT_MODEL] + [m for m in FALLBACK_MODELS if m != DEFAULT_MODEL]:
-            _key = gemini_cache_key(audio_bytes, source_language, target_language, _model)
+            _key = gemini_cache_key(audio_bytes, "auto", target_language, _model)
             _cached = get_cache(_key)
             if _cached:
                 try:
                     _res = TranscriptionResult.model_validate_json(_cached)
-                    # A cache hit costs nothing, so it must not report tokens.
                     _res.input_tokens = 0
                     _res.output_tokens = 0
                     logger.info("gemini cache hit model=%s", _model)
@@ -233,33 +258,36 @@ async def transcribe_and_translate(
     keys = key_pool(tier)
     if not keys:
         raise PermanentError(GEMINI_NOT_CONFIGURED, "GEMINI_API_KEY is not configured")
-    prompt = _prompt(source_language, target_language)
+
     models = [DEFAULT_MODEL] + [m for m in FALLBACK_MODELS if m != DEFAULT_MODEL]
-    # Keys inner: burn every key's quota on the primary model before falling back.
     attempts = [(model, key) for model in models for key in keys]
 
     last_exc: Exception | None = None
     for model, api_key in attempts:
         try:
             logger.info(
-                "gemini call model=%s key=%s source=%s target=%s",
+                "gemini call model=%s key=%s target=%s",
                 model,
                 api_key[-4:],
-                source_language,
                 target_language,
             )
-            result = await _call_once(_client(api_key), model, audio_bytes, prompt)
+            prompt = _prompt(target_language)
+            lang, segments = await _call_once(_client(api_key), model, audio_bytes, prompt)
+
             # Post-processing: sort, drop empty, merge <0.4s (plan/009 T1.2)
             from segments import normalize_segments
 
-            result.segments = normalize_segments(result.segments)
+            result = TranscriptionResult(
+                detected_language=lang,
+                segments=normalize_segments(segments),
+            )
             logger.info("gemini success model=%s segments=%d", model, len(result.segments))
             # put cache
             try:
                 from cache import gemini_cache_key, put_cache
 
                 put_cache(
-                    gemini_cache_key(audio_bytes, source_language, target_language, model),
+                    gemini_cache_key(audio_bytes, "auto", target_language, model),
                     result.model_dump_json().encode(),
                 )
             except Exception:
@@ -267,7 +295,7 @@ async def transcribe_and_translate(
             return result
         except QuotaExhaustedError as exc:
             logger.warning(
-                "gemini quota exhausted model=%s key=%s: %s — trying next",
+                "gemini quota exhausted model=%s key=%s: %s -- trying next",
                 model,
                 api_key[-4:],
                 exc.message,
@@ -275,8 +303,6 @@ async def transcribe_and_translate(
             last_exc = exc
             continue
         except PermanentError as exc:
-            # Another key (or model) may still work, so keep going; the last error is
-            # raised once every attempt is exhausted.
             logger.warning(
                 "gemini permanent error model=%s key=%s: %s", model, api_key[-4:], exc.message
             )
@@ -284,7 +310,7 @@ async def transcribe_and_translate(
             continue
         except TransientError as exc:
             logger.warning(
-                "gemini transient error model=%s: %s — trying fallback", model, exc.message
+                "gemini transient error model=%s: %s -- trying fallback", model, exc.message
             )
             last_exc = exc
             continue

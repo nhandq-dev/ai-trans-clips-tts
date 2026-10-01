@@ -236,6 +236,15 @@ async def render_translated_video(
                 y = max(0, vh - h - max(2, vh // 20))
                 w = vw
                 x = 0
+            # the OCR box can be far too tall, making the blur cover half the frame.
+            # Cap the band height and anchor it to the box bottom (the text sits at
+            # the bottom), so a tiny row of subtitles does not blur the whole video.
+            max_blur_h = int(os.getenv("SUBTITLE_MAX_BLUR_HEIGHT", "100"))
+            if h > max_blur_h:
+                y += h - max_blur_h
+                h = max_blur_h
+                if y < 0:
+                    y = 0
         # boxblur radius is bounded by min(w, h)/2; keep it valid for small crops
         radius = max(1, min(10, min(w, h) // 2 - 1))
         chroma = max(1, min(5, radius // 2)) if radius >= 2 else 1
