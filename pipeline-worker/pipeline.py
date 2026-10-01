@@ -389,6 +389,9 @@ async def run_pipeline(job_id: str):
                     break
                 src = tts_paths[idx]
                 slot = seg.end - seg.start
+                if slot <= 0:
+                    # malformed segment timing; skip instead of failing the whole job
+                    continue
                 dst = aligned_dir / f"seg_{idx:04d}.wav"
                 if dst.exists():
                     aligned_clips.append((dst, seg.start))
