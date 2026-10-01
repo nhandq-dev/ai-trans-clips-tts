@@ -428,19 +428,19 @@ async def run_pipeline(job_id: str):
             position = job.options.get("subtitle_position", "bottom")
             if job.options.get("remove_original_subtitles", True):
                 await _update(job_id, "detecting_subs", 60)
-                from subtitles import default_box, detect_subtitle_box
+                from subtitles import detect_subtitle_box
 
                 box = await detect_subtitle_box(source_mp4, position, work_dir=work)
                 if box.get("confidence", 0) < 0.3:
-                    # couldn't find a stable box -> blur the default band instead of guessing
-                    from media import probe as media_probe
-
-                    info = await media_probe(source_mp4)
-                    box = default_box(info["width"], info["height"], position)
+                    # Couldn't find a stable subtitle box: blurring a guessed band
+                    # looks worse than not blurring at all. Just burn the new
+                    # subtitles over their default position.
+                    box = None
                 blur_box = box
-                import json as _json
+                if box:
+                    import json as _json
 
-                (work / "subtitle_box.json").write_text(_json.dumps(box), encoding="utf-8")
+                    (work / "subtitle_box.json").write_text(_json.dumps(box), encoding="utf-8")
             if job.options.get("burn_subtitles", True):
                 from media import probe as media_probe
                 from subtitles import write_ass
