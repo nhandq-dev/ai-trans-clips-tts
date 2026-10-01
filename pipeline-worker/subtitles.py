@@ -208,7 +208,9 @@ def write_ass(
     """Render new subtitles as ASS, positioned inside ``box``."""
     style = style or {}
     font = style.get("font", "Arial")
-    size = int(style.get("size", 24))
+    # Default font scales with the frame height (e.g. 60px on 1080p); an explicit
+    # "size" in subtitle_style still wins.
+    size = int(style.get("size", 0)) or max(28, min(64, height // 18))
     color = (
         _ass_color((255, 255, 255))
         if style.get("color", "white") == "white"
