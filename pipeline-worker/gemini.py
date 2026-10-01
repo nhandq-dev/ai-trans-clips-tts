@@ -20,7 +20,7 @@ from errors import (
 )
 from google import genai
 from google.genai import types
-from schemas import TranscriptionResult, Segment
+from schemas import Segment, TranscriptionResult
 from tenacity import (
     retry_if_exception_type,
     stop_after_attempt,
@@ -173,8 +173,8 @@ async def _call_once(
                     raise err_cls(GEMINI_FAILED, str(exc)) from exc
 
                 usage = getattr(resp, "usage_metadata", None)
-                input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
-                output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+                _ = int(getattr(usage, "prompt_token_count", 0) or 0)
+                _ = int(getattr(usage, "candidates_token_count", 0) or 0)
 
                 # Parse JSON response (new format)
                 text = resp.text  # type: ignore[union-attr]
@@ -183,7 +183,6 @@ async def _call_once(
                 except json.JSONDecodeError as exc:
                     raise TransientError(GEMINI_FAILED, f"invalid json from {model}: {exc}") from exc
 
-                lang = data.get("lang", "unknown")
                 segs_raw = data.get("s", [])
                 segments: list[Segment] = []
                 for item in segs_raw:
@@ -208,15 +207,7 @@ async def _call_once(
                         )
                     )
 
-                return data.get("lang", "unknown"), [
-                    Segment(
-                        start=s.start,
-                        end=s.end,
-                        source_text=s.source_text,
-                        target_text=s.target_text,
-                    )
-                    for s in segments
-                ]
+                return data.get("lang", "unknown"), segments
         raise TransientError(GEMINI_FAILED, f"exhausted retries for {model}")
 
     return await asyncio.to_thread(_do)
@@ -224,7 +215,6 @@ async def _call_once(
 
 async def transcribe_and_translate(
     audio_path: str | Path,
-    source_language: str = "auto",
     target_language: str = "vi",
     context: str = "",
     glossary: str = "",
@@ -279,7 +269,7 @@ async def transcribe_and_translate(
                 api_key[-4:],
                 target_language,
             )
-            prompt = _prompt(target_language)  # source_language ignored (auto-detect)
+            prompt = _prompt(target_language)
             lang, segments = await _call_once(_client(api_key), model, audio_bytes, prompt)
 
             # Post-processing: sort, drop empty, merge <0.4s (plan/009 T1.2)
@@ -303,7 +293,7 @@ async def transcribe_and_translate(
             return result
         except QuotaExhaustedError as exc:
             logger.warning(
-                "gemini quota exhausted model=%s key=%s: %s — trying next",
+                "gemini quota exhausted model=%s key=%s: %s -- trying next",
                 model,
                 api_key[-4:],
                 exc.message,
@@ -318,7 +308,7 @@ async def transcribe_and_translate(
             continue
         except TransientError as exc:
             logger.warning(
-                "gemini transient error model=%s: %s — trying fallback", model, exc.message
+                "gemini transient error model=%s: %s -- trying fallback", model, exc.message
             )
             last_exc = exc
             continue
