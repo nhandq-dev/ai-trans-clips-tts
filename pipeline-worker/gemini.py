@@ -181,7 +181,9 @@ async def _call_once(
                 try:
                     data = json.loads(text)
                 except json.JSONDecodeError as exc:
-                    raise TransientError(GEMINI_FAILED, f"invalid json from {model}: {exc}") from exc
+                    raise TransientError(
+                        GEMINI_FAILED, f"invalid json from {model}: {exc}"
+                    ) from exc
 
                 segs_raw = data.get("s", [])
                 segments: list[Segment] = []
