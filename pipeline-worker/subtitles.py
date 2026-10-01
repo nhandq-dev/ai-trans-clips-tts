@@ -1,21 +1,27 @@
 """Subtitle handling — detect original box, blur it, render new ASS (plan/009 T3.2-T3.4).
 
-Detection is cheap and OCR-free: sample ~1 fps in the top/bottom half, threshold
-high-contrast text, merge characters into line blobs, and pick the band that
-appears most consistently.
+Detection prefers OCR (EasyOCR), ported from the legacy video-translator-saas
+worker: it samples frames, runs EasyOCR's text detector, clusters detections
+into vertical lines and keeps the dominant line — so the real subtitle row is
+found accurately and watermarks are filtered out. The cv2 contour heuristic is
+kept as a fallback when EasyOCR is not installed.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import threading
 from pathlib import Path
 
 import cv2
 import numpy as np
 from errors import SUBTITLE_DETECT_FAILED, PermanentError, TransientError
 from schemas import TranscriptionResult
+
+logger = logging.getLogger("pipeline-worker.subtitles")
 
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
@@ -26,6 +32,34 @@ STABLE_RATIO = float(os.getenv("SUBTITLE_STABLE_RATIO", "0.6"))
 # 0.5 scans the whole half so bands sitting above the classic bottom-third strip
 # are still found.
 REGION_RATIO = float(os.getenv("SUBTITLE_REGION_RATIO", "0.5"))
+
+# OCR scan params (legacy port): how far into the video to sample, the sampling
+# step, and how many seconds of confirmation after the first text hit.
+OCR_MAX_DURATION = float(os.getenv("SUBTITLE_OCR_MAX_DURATION", "120"))
+OCR_INTERVAL = float(os.getenv("SUBTITLE_OCR_INTERVAL", "2"))
+OCR_CONFIRM_SECONDS = float(os.getenv("SUBTITLE_OCR_CONFIRM_SECONDS", "2"))
+
+_OCR_READER: object | None = None
+_OCR_READER_LOCK = threading.Lock()
+
+
+def _ocr_reader() -> object:
+    """Lazily build (and cache) the EasyOCR reader. Heavy first call (model download)."""
+    global _OCR_READER
+    if _OCR_READER is not None:
+        return _OCR_READER
+    with _OCR_READER_LOCK:
+        if _OCR_READER is None:
+            import easyocr
+
+            _OCR_READER = easyocr.Reader(
+                ["en"],
+                gpu=False,
+                verbose=False,
+                model_storage_directory=os.getenv("EASYOCR_MODEL_DIR") or None,
+            )
+    return _OCR_READER
+
 
 # Fixed ASS v4+ syntax lines (long by nature; see write_ass).
 _ASS_FORMAT_LINE = (  # noqa: E501
@@ -100,15 +134,11 @@ def _detect_boxes_in_frame(
     return boxes
 
 
-async def detect_subtitle_box(
+async def _detect_box_cv2(
     video_path: str | Path,
     position: str = "bottom",
-    work_dir: str | Path | None = None,
 ) -> dict:
-    """Detect the original subtitle box. Returns {x,y,w,h,position,confidence}.
-
-    ``confidence`` is the fraction of sampled frames where the box was present.
-    """
+    """cv2 contour fallback. Returns {x,y,w,h,position,confidence}."""
     video_path = Path(video_path)
     info = await _probe(video_path)
     width, height = info["width"], info["height"]
@@ -198,6 +228,150 @@ async def detect_subtitle_box(
         "position": position,
         "confidence": round(confidence, 3),
     }
+
+
+def _detect_with_easyocr(video_path: Path, position: str) -> dict | None:
+    """OCR-based detection, ported from the legacy video-translator-saas worker.
+
+    Samples frames every ``OCR_INTERVAL`` seconds up to ``OCR_MAX_DURATION``,
+    runs EasyOCR's text detector on the top/bottom region, clusters the detected
+    boxes into vertical lines and keeps the dominant line (the one that appears
+    most consistently at the same height — filters watermarks/one-off text).
+    Returns None when no subtitle text is found.
+    """
+    reader = _ocr_reader()
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise TransientError(SUBTITLE_DETECT_FAILED, "cannot open video for OCR")
+
+    all_boxes: list[list[int]] = []
+    first_detect_frame: int | None = None
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if width == 0 or height == 0 or fps == 0:
+            raise TransientError(SUBTITLE_DETECT_FAILED, "cannot determine video dims for OCR")
+
+        sample_count = min(total_frames, int(fps * OCR_MAX_DURATION))
+        step = max(1, int(fps * OCR_INTERVAL))
+        region_h = max(8, int(height * REGION_RATIO))
+
+        for frame_idx in range(0, sample_count, step):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            h, w, _ = frame.shape
+            if position == "top":
+                crop_y = 0
+            else:
+                crop_y = h - region_h
+            region = frame[crop_y : crop_y + region_h, 0:w]
+
+            detections = reader.detect(region)
+            boxes = detections[0] if detections else None
+            frame_has_text = False
+            if boxes is not None and len(boxes) > 0 and boxes[0] is not None:
+                for box in boxes[0]:
+                    if box is None or len(box) < 4:
+                        continue
+                    x_min, x_max, y_min, y_max = box[0], box[1], box[2], box[3]
+                    bw = x_max - x_min
+                    bh = y_max - y_min
+                    # Reject tiny fragments (logos, specks) that are not readable text.
+                    if bw < 30 or bh < 10:
+                        continue
+                    frame_has_text = True
+                    all_boxes.append(
+                        [int(x_min), int(x_max), int(y_min + crop_y), int(y_max + crop_y)]
+                    )
+
+            if frame_has_text and first_detect_frame is None:
+                first_detect_frame = frame_idx
+            # Adaptive stop: once detected, scan `confirm_seconds` more then stop.
+            if first_detect_frame is not None:
+                elapsed = (frame_idx - first_detect_frame) / fps
+                if elapsed >= OCR_CONFIRM_SECONDS:
+                    break
+    finally:
+        cap.release()
+
+    if not all_boxes:
+        return None
+
+    # Cluster detections into vertical lines; the dominant cluster is the subtitle.
+    centers = [(b[2] + b[3]) / 2 for b in all_boxes]
+    clusters: list[dict] = []
+    for c in sorted(centers):
+        placed = False
+        for cl in clusters:
+            if abs(c - cl["mean"]) <= 40:
+                cl["vals"].append(c)
+                cl["mean"] = sum(cl["vals"]) / len(cl["vals"])
+                placed = True
+                break
+        if not placed:
+            clusters.append({"vals": [c], "mean": c})
+
+    best = max(clusters, key=lambda cl: len(cl["vals"]))
+    band_min = min(best["vals"])
+    band_max = max(best["vals"])
+    best_boxes = [b for b in all_boxes if band_min - 10 <= (b[2] + b[3]) / 2 <= band_max + 10]
+
+    arr = np.array(best_boxes)
+    final_y_min = int(np.min(arr[:, 2]))
+
+    padding = 10
+    # Anchor to the top edge of the dominant line, cap the region height.
+    result_y = max(0, final_y_min - padding)
+    if width > height:
+        result_w = int(width * 0.65)
+        result_x = int((width - result_w) / 2)
+    else:
+        result_w = width - 2 * padding
+        result_x = padding
+    result_h = min(90, max(1, height - result_y))
+
+    logger.info(
+        "OCR subtitle region: x=%d y=%d w=%d h=%d (from %d detections in dominant line, %d total)",
+        result_x,
+        result_y,
+        result_w,
+        result_h,
+        len(best_boxes),
+        len(all_boxes),
+    )
+    return {
+        "x": result_x,
+        "y": result_y,
+        "w": result_w,
+        "h": result_h,
+        "position": position,
+        "confidence": 0.9,
+    }
+
+
+async def detect_subtitle_box(
+    video_path: str | Path,
+    position: str = "bottom",
+    work_dir: str | Path | None = None,
+) -> dict:
+    """Detect the original subtitle box. Returns {x,y,w,h,position,confidence}.
+
+    Prefers OCR (EasyOCR); falls back to the cv2 contour heuristic when OCR is
+    unavailable. ``confidence`` < 0.3 makes the caller skip the blur.
+    """
+    video_path = Path(video_path)
+    try:
+        box = await asyncio.to_thread(_detect_with_easyocr, video_path, position)
+        if box is not None:
+            return box
+        logger.warning("OCR found no subtitle line; falling back to cv2 heuristic")
+    except Exception as exc:
+        logger.warning("OCR detection unavailable (%s); falling back to cv2", exc)
+    return await _detect_box_cv2(video_path, position)
 
 
 def default_box(width: int, height: int, position: str = "bottom") -> dict:
