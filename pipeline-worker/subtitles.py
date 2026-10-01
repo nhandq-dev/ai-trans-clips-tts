@@ -1,7 +1,8 @@
 """Subtitle handling — detect original box, blur it, render new ASS (plan/009 T3.2-T3.4).
 
-Detection is cheap and OCR-free: sample ~1 fps in the top/bottom third, threshold
-high-contrast text, find contours, and pick the box that appears most consistently.
+Detection is cheap and OCR-free: sample ~1 fps in the top/bottom half, threshold
+high-contrast text, merge characters into line blobs, and pick the band that
+appears most consistently.
 """
 
 from __future__ import annotations
@@ -21,6 +22,10 @@ FFPROBE_BIN = os.getenv("FFPROBE_BIN", "ffprobe")
 SAMPLE_FPS = float(os.getenv("SUBTITLE_SAMPLE_FPS", "1"))
 MAX_SAMPLES = int(os.getenv("SUBTITLE_MAX_SAMPLES", "30"))
 STABLE_RATIO = float(os.getenv("SUBTITLE_STABLE_RATIO", "0.6"))
+# How much of the frame height is scanned for subtitles (bottom/top half).
+# 0.5 scans the whole half so bands sitting above the classic bottom-third strip
+# are still found.
+REGION_RATIO = float(os.getenv("SUBTITLE_REGION_RATIO", "0.5"))
 
 # Fixed ASS v4+ syntax lines (long by nature; see write_ass).
 _ASS_FORMAT_LINE = (  # noqa: E501
@@ -61,24 +66,35 @@ async def _probe(path: str | Path) -> dict:
 def _detect_boxes_in_frame(
     gray: np.ndarray, region_y: int, region_h: int, width: int
 ) -> list[tuple[int, int, int, int]]:
-    """Find high-contrast text-like boxes in the given region of a grayscale frame."""
+    """Find high-contrast subtitle-line blobs in the given region.
+
+    Subtitle lines are wide and short. After thresholding and a wide horizontal
+    closing, keep only wide-and-short blobs and reject full-width solid bars
+    (letterbox edges / watermarks) and tiny specks.
+    """
     region = gray[region_y : region_y + region_h, 0:width]
     if region.size == 0:
         return []
     # adaptive threshold to catch text on varying backgrounds
     thr = cv2.adaptiveThreshold(
-        region, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 25, 10
+        region, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 31, 10
     )
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+    # wide kernel merges characters into solid horizontal line blobs
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 5))
     morph = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(morph, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_w = max(40, int(width * 0.15))
+    max_h = max(12, int(region_h * 0.4))
     boxes: list[tuple[int, int, int, int]] = []
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
-        area = w * h
-        if area < (width * region_h) * 0.002:  # too small
+        if h < 10 or w < min_w:
             continue
-        if h < 8 or w < 20:
+        if h > max_h:
+            continue
+        if w > int(width * 0.98):
+            continue
+        if w * h < (width * region_h) * 0.004:
             continue
         boxes.append((x, y + region_y, w, h))
     return boxes
@@ -99,9 +115,10 @@ async def detect_subtitle_box(
     duration = info["duration"]
 
     if position == "top":
-        region_y, region_h = 0, height // 3
+        region_y, region_h = 0, int(height * REGION_RATIO)
     else:
-        region_y, region_h = (height * 2) // 3, height // 3
+        region_h = max(8, int(height * REGION_RATIO))
+        region_y, region_h = height - region_h, region_h
 
     # sample frames at SAMPLE_FPS (cap MAX_SAMPLES) via ffmpeg -> rawvideo gray
     fps = min(SAMPLE_FPS, MAX_SAMPLES / max(duration, 1.0)) if duration else SAMPLE_FPS
@@ -132,22 +149,26 @@ async def detect_subtitle_box(
     if n_frames == 0:
         raise PermanentError(SUBTITLE_DETECT_FAILED, "no frames sampled")
 
-    # count how often each coarse box (rounded) appears
-    counts: dict[tuple[int, int, int, int], int] = {}
+    # Vote on the vertical band (rounded y, h) across frames, then take the
+    # horizontal extent (min x .. max right edge) wherever that band appeared,
+    # so the blur covers the whole row even if the subtitle is centered/varies.
+    bands: dict[tuple[int, int], dict[str, float]] = {}
     for i in range(n_frames):
         frame = np.frombuffer(raw[i * frame_size : (i + 1) * frame_size], dtype=np.uint8).reshape(
             height, width
         )
         for b in _detect_boxes_in_frame(frame, region_y, region_h, width):
-            key = (
-                round(b[0] / 20) * 20,
-                round(b[1] / 10) * 10,
-                round(b[2] / 20) * 20,
-                round(b[3] / 5) * 5,
+            key = (round(b[1] / 10) * 10, round(b[3] / 5) * 5)
+            acc = bands.setdefault(
+                key, {"n": 0, "min_x": float(width), "max_rx": 0.0, "y": 0.0, "h": 0.0}
             )
-            counts[key] = counts.get(key, 0) + 1
+            acc["n"] += 1
+            acc["min_x"] = min(acc["min_x"], float(b[0]))
+            acc["max_rx"] = max(acc["max_rx"], float(b[0] + b[2]))
+            acc["y"] += b[1]
+            acc["h"] += b[3]
 
-    if not counts:
+    if not bands:
         # no text detected -> low confidence, caller falls back to default position
         return {
             "x": 0,
@@ -158,9 +179,12 @@ async def detect_subtitle_box(
             "confidence": 0.0,
         }
 
-    best, hits = max(counts.items(), key=lambda kv: kv[1])
-    confidence = hits / n_frames
-    x, y, w, h = best
+    _, acc = max(bands.items(), key=lambda kv: kv[1]["n"])
+    confidence = acc["n"] / n_frames
+    y = int(acc["y"] / acc["n"])
+    h = max(1, int(acc["h"] / acc["n"]))
+    x = max(0, int(acc["min_x"]))
+    w = max(1, int(acc["max_rx"]) - x)
     # clamp
     x = max(0, min(x, width - 1))
     y = max(0, min(y, height - 1))
