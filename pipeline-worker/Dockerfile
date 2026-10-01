@@ -9,17 +9,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOST=0.0.0.0 \
     PORT=8006 \
     WORK_DIR=/data/pipeline-output \
-    CACHE_DIR=/data/pipeline-cache
+    CACHE_DIR=/data/pipeline-cache \
+    EASYOCR_MODEL_DIR=/data/pipeline-cache/easyocr
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# EasyOCR needs torch (+torchvision); install the CPU builds (the default PyPI
+# wheels are the huge CUDA builds) before resolving requirements.
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

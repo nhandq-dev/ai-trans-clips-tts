@@ -22,4 +22,7 @@ srt>=3.5.0
 numpy>=1.26.0
 opencv-python-headless>=4.10.0
 
+# OCR subtitle-region detection (legacy video-translator-saas approach)
+easyocr>=1.7.2
+
 # Audio/subtitle — srt already above, no extra
