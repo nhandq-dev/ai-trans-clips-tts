@@ -18,3 +18,7 @@ video-worker/output/
 # pipeline-worker runtime dirs
 pipeline-worker/cache/
 pipeline-worker/output/
+
+# tooling caches
+.codegraph/
+.serena/
