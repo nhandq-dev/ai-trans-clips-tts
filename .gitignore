@@ -20,5 +20,6 @@ pipeline-worker/cache/
 pipeline-worker/output/
 
 # tooling caches
+AGENTS.md
 .codegraph/
 .serena/
