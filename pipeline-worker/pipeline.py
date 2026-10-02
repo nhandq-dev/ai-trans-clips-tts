@@ -23,6 +23,13 @@ logger = logging.getLogger("pipeline-worker")
 WORK_DIR = Path(os.getenv("WORK_DIR") or (Path(__file__).parent / "output"))
 CACHE_DIR = Path(os.getenv("CACHE_DIR") or (Path(__file__).parent / "cache"))
 
+# The heavy ffmpeg render (libx264 encode + mux) is the CPU-bound step. Many jobs
+# may download / transcribe (Gemini) / synthesize TTS in parallel, but only
+# `MUX_CONCURRENCY` of them burn CPU encoding at once. This lets a newly queued
+# job race through the cheap stages while the mux lanes are busy.
+MUX_CONCURRENCY = max(1, int(os.getenv("MUX_CONCURRENCY", "2")))
+_MUX_SEM = asyncio.Semaphore(MUX_CONCURRENCY)
+
 # stage progress map (plan/009 §4.2)
 STAGE_PROGRESS = {
     "downloading": 15,
@@ -417,61 +424,63 @@ async def run_pipeline(job_id: str):
             await _update(job_id, "muxing")
             from mux import build_dub_track, probe_duration, render_translated_video
 
-            video_duration = await probe_duration(source_mp4)
-            dub_wav = work / "dub.wav"
-            if not dub_wav.exists():
-                await build_dub_track(aligned_clips, video_duration, dub_wav)
+            async with _MUX_SEM:
+                video_duration = await probe_duration(source_mp4)
+                dub_wav = work / "dub.wav"
+                if not dub_wav.exists():
+                    await build_dub_track(aligned_clips, video_duration, dub_wav)
 
-            # ---- subtitles (T3.2 detect → T3.4 ass → T3.5 single-pass render) ----
-            blur_box = None
-            ass_path = None
-            position = job.options.get("subtitle_position", "bottom")
-            if job.options.get("remove_original_subtitles", True):
-                await _update(job_id, "detecting_subs", 60)
-                from subtitles import detect_subtitle_box
+                # ---- subtitles (T3.2 detect → T3.4 ass → T3.5 single-pass render) ----
+                blur_box = None
+                ass_path = None
+                position = job.options.get("subtitle_position", "bottom")
+                if job.options.get("remove_original_subtitles", True):
+                    await _update(job_id, "detecting_subs", 60)
+                    from subtitles import detect_subtitle_box
 
-                box = await detect_subtitle_box(source_mp4, position, work_dir=work)
-                if box.get("confidence", 0) < 0.3:
-                    # Couldn't find a stable subtitle box: blurring a guessed band
-                    # looks worse than not blurring at all. Just burn the new
-                    # subtitles over their default position.
-                    box = None
-                blur_box = box
-                if box:
-                    import json as _json
+                    box = await detect_subtitle_box(source_mp4, position, work_dir=work)
+                    if box.get("confidence", 0) < 0.3:
+                        # Couldn't find a stable subtitle box: blurring a guessed band
+                        # looks worse than not blurring at all. Just burn the new
+                        # subtitles over their default position.
+                        box = None
+                    blur_box = box
+                    if box:
+                        import json as _json
 
-                    (work / "subtitle_box.json").write_text(_json.dumps(box), encoding="utf-8")
-            if job.options.get("burn_subtitles", True):
-                from media import probe as media_probe
-                from subtitles import write_ass
+                        (work / "subtitle_box.json").write_text(_json.dumps(box), encoding="utf-8")
+                if job.options.get("burn_subtitles", True):
+                    from media import probe as media_probe
+                    from subtitles import write_ass
 
-                info = await media_probe(source_mp4)
-                box_for_ass = blur_box or {
-                    "x": 0,
-                    "y": int(info["height"] * 0.75),
-                    "w": info["width"],
-                    "h": int(info["height"] * 0.2),
-                }
-                ass_path = write_ass(
-                    result,
-                    box_for_ass,
-                    work / "newsubs.ass",
-                    width=info["width"],
-                    height=info["height"],
-                    style=job.options.get("subtitle_style"),
+                    info = await media_probe(source_mp4)
+                    box_for_ass = blur_box or {
+                        "x": 0,
+                        "y": int(info["height"] * 0.75),
+                        "w": info["width"],
+                        "h": int(info["height"] * 0.2),
+                    }
+                    ass_path = write_ass(
+                        result,
+                        box_for_ass,
+                        work / "newsubs.ass",
+                        width=info["width"],
+                        height=info["height"],
+                        style=job.options.get("subtitle_style"),
+                    )
+
+                translated = work / "translated.mp4"
+                await render_translated_video(
+                    source_mp4,
+                    dub_wav,
+                    ass_path,
+                    translated,
+                    blur_box=blur_box,
+                    watermark=job.options.get("watermark"),
+                    original_volume_db=job.options.get("original_audio_volume_db", -20),
+                    mute_original=job.options.get("mute_original", False),
                 )
 
-            translated = work / "translated.mp4"
-            await render_translated_video(
-                source_mp4,
-                dub_wav,
-                ass_path,
-                translated,
-                blur_box=blur_box,
-                watermark=job.options.get("watermark"),
-                original_volume_db=job.options.get("original_audio_volume_db", -20),
-                mute_original=job.options.get("mute_original", False),
-            )
             # upload to S3 if configured
             # Thumbnail for the projects grid (best-effort; never fail the job).
             thumb_path = work / "thumbnail.jpg"
