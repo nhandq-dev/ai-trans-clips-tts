@@ -4,10 +4,11 @@ Replaces edge-tts for every non-Vietnamese language: everything runs on-device,
 so there is no network dependency and no Microsoft 403 blocking at synthesis
 time. Fits the existing CPU/ONNX stack (VieNeu already uses onnxruntime).
 
-Model files (`kokoro-v1.0.onnx` ~326 MB + `voices-v1.0.bin` ~28 MB) are
+Model files (`kokoro-v1.0.fp16.onnx` ~164 MB + `voices-v1.0.bin` ~28 MB) are
 downloaded once from the official release into the model dir and cached on disk;
 override the URLs via `KOKORO_MODEL_URL`/`KOKORO_VOICES_URL` for air-gapped
-deploys.
+deploys. The fp16 export runs on CPU and halves working RAM vs fp32 with
+negligible quality loss.
 """
 
 from __future__ import annotations
@@ -24,7 +25,11 @@ import soundfile as sf
 from app.core.config import get_settings
 from app.services.engine_router import kokoro_lang_for
 
-MODEL_FILE = "kokoro-v1.0.onnx"
+# fp16 export of kokoro-v1.0: ~164 MB on disk and ~half the working RAM of the
+# full-precision model while staying essentially lossless (spectral correlation
+# ~0.999 per the upstream release notes). Override the URL for the fp32/int8
+# variants if a deploy needs them.
+MODEL_FILE = "kokoro-v1.0.fp16.onnx"
 VOICES_FILE = "voices-v1.0.bin"
 RELEASE_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1"
 

@@ -71,8 +71,16 @@ def call(method: str, path: str, body: bytes = b"", content_type: str | None = N
     request = urllib.request.Request(
         BASE_URL + path, data=body or None, method=method, headers=headers
     )
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        return response.status, response.headers.get("Content-Type"), response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            return response.status, response.headers.get("Content-Type"), response.read()
+    except urllib.error.HTTPError as exc:
+        # Surface the error response body: the worker returns the synthesis
+        # exception message in the JSON detail, which is the fastest way to
+        # diagnose a failed engine from CI.
+        error_body = exc.read()
+        print(f"HTTP {exc.code} body: {error_body.decode(errors='replace')[:400]}", file=sys.stderr)
+        return exc.code, exc.headers.get("Content-Type"), error_body
 
 
 def main() -> int:

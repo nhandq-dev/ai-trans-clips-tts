@@ -7,8 +7,9 @@ All notable changes to this project are documented here.
 ### Added
 
 - Kokoro-82M TTS via `kokoro-onnx` (ONNX Runtime) replacing edge-tts: on-device for all
-  non-Vietnamese languages, no external TTS API. Model files (`kokoro-v1.0.onnx` +
-  `voices-v1.0.bin`) auto-download to `KOKORO_MODEL_DIR`/`HF_HOME/kokoro/` on first run.
+  non-Vietnamese languages, no external TTS API. Model files (`kokoro-v1.0.fp16.onnx` +
+  `voices-v1.0.bin`) auto-download to `KOKORO_MODEL_DIR`/`HF_HOME/kokoro/` on first run
+  (fp16 export: ~half the working RAM of fp32 at ~lossless quality).
 - New languages from Kokoro: Hindi, Italian, Brazilian Portuguese (dropping Korean and German,
   which Kokoro does not support). Catalog is now derived from a single `_LANG_META`/`_KOKORO_VOICES`
   source of truth.

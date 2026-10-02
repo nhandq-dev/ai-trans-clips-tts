@@ -166,7 +166,7 @@ TTS runtime:
 | `FFMPEG_BIN` | ffmpeg binary path |
 | `VIENEU_BACKEND` | ONNX backend selection |
 | `VIENEU_DEFAULT_VOICE` | Default Vietnamese voice |
-| `KOKORO_MODEL_DIR` | Where `kokoro-v1.0.onnx` + `voices-v1.0.bin` live (blank = `HF_HOME/kokoro/`); auto-downloaded on first run |
+| `KOKORO_MODEL_DIR` | Where `kokoro-v1.0.fp16.onnx` + `voices-v1.0.bin` live (blank = `HF_HOME/kokoro/`); auto-downloaded on first run |
 | `KOKORO_DEFAULT_VOICE` | Default non-Vietnamese voice (`af_heart`) |
 | `KOKORO_CHUNK_CHARS`, `KOKORO_SPEED` | Chunking and speed for Kokoro synthesis |
 
