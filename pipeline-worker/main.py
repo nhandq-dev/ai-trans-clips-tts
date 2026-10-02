@@ -444,6 +444,7 @@ async def _process_job(job_id: str) -> None:
         if isinstance(exc, str):
             code = exc
         _metrics["by_code"][code] = _metrics["by_code"].get(code, 0) + 1
+        logger.exception("job %s pipeline crashed: %s", job_id, exc)
         # run_pipeline already set job to failed, but ensure
         try:
             await job_store.update_job(

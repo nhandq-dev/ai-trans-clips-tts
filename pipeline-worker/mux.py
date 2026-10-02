@@ -267,7 +267,8 @@ async def render_translated_video(
     if watermark:
         if dims is None:
             dims = await _video_size(video_path)
-        vh = int(dims["height"]) if dims else 1080
+        # _video_size returns a (width, height) tuple.
+        vh = dims[1] if dims else 1080
         fs = max(22, min(48, int(vh * 0.04)))
         # drawtext reads the text from a file so no ffmpeg escaping is needed.
         wm_file = out_path.parent / "watermark.txt"

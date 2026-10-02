@@ -148,7 +148,7 @@ class Scheduler:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("job %s crashed: %s", job_id, exc)
+            logger.exception("job %s crashed: %s", job_id, exc)
         finally:
             self._tasks.pop(job_id, None)
             remaining = self._running_per_user.get(user_key, 1) - 1
