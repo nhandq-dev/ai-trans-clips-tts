@@ -68,8 +68,20 @@ class Settings(BaseSettings):
     vieneu_backend: str = "onnx"
     vieneu_default_voice: str = "Adam"
     vieneu_chunk_chars: int = 280
-    edge_fallback_voice: str = "en-US-JennyNeural"
-    edge_chunk_chars: int = 300
+
+    # Kokoro-82M (all languages except Vietnamese) — on-device ONNX TTS replacing
+    # edge-tts: no network at synthesis time, no Microsoft 403 blocking.
+    # Model directory for `kokoro-v1.0.onnx` + `voices-v1.0.bin`. Leave blank to
+    # resolve under `hf_home` (HF_HOME) -> `<hf_home>/kokoro/`.
+    kokoro_model_dir: Path | None = None
+    kokoro_default_voice: str = "af_heart"
+    kokoro_chunk_chars: int = 500
+    kokoro_speed: float = 1.0
+    kokoro_model_url: str = ""
+    kokoro_voices_url: str = ""
+    # Preload the Kokoro model at boot (alongside VieNeu) when READINESS_WARMUP is
+    # on. Disable on a tight-RAM VPS; first request then pays the load cost.
+    kokoro_warmup: bool = True
 
     # Custom (cloned) Vietnamese voices
     custom_voice_enabled: bool = True

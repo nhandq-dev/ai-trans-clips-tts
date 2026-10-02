@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import threading
 import uuid
 from collections.abc import Callable
@@ -10,7 +9,7 @@ import numpy as np
 
 from app.core.config import get_settings
 from app.services.chunking import split_text
-from app.services.engine_router import EDGE_DEFAULT_VOICES, is_vietnamese, lang_code
+from app.services.engine_router import default_voice_for, is_vietnamese
 from app.services.storage import cleanup_workdir, make_workdir, merge, output_dir
 from app.services.voice_catalog import VIENEU as VIENEU_ENGINE
 from app.services.voice_catalog import VOICES
@@ -37,11 +36,16 @@ def _get_model():
 
 
 def warm_up() -> None:
-    """Load the VieNeu model ahead of the first request.
+    """Load the VieNeu and Kokoro models ahead of the first request.
 
-    Enabled via `READINESS_WARMUP`; edge-tts is remote and needs no warmup.
+    Enabled via `READINESS_WARMUP`; both engines are local now, so preloading
+    pays off. Set `KOKORO_WARMUP=false` to keep Kokoro lazy on a tight-RAM VPS.
     """
     _get_model()
+    if get_settings().kokoro_warmup:
+        from app.services import kokoro
+
+        kokoro.get_model()
 
 
 def _resolve_vieneu_voice(voice: str | None) -> str:
@@ -64,13 +68,6 @@ def to_vieneu_voice_arg(voice_data: object | None) -> dict | None:
         "speaker_emb": np.asarray(speaker_emb, dtype=np.float32),
         "codes": None if ref_codes is None else np.asarray(ref_codes, dtype=np.int64),
     }
-
-
-def _resolve_edge_voice(language: str, voice: str | None) -> str:
-    value = (voice or "").strip()
-    if value:
-        return value
-    return EDGE_DEFAULT_VOICES.get(lang_code(language), get_settings().edge_fallback_voice)
 
 
 def _synth_vieneu(
@@ -101,13 +98,14 @@ def _synth_vieneu(
     merge(files, dest, "wav", fmt, workdir)
 
 
-async def _edge_chunk(text: str, voice: str, dest: Path) -> None:
-    from edge_tts import Communicate
+def _resolve_kokoro_voice(language: str, voice: str | None) -> str:
+    value = (voice or "").strip()
+    if value:
+        return value
+    return default_voice_for(language)
 
-    await Communicate(text, voice).save(str(dest))
 
-
-def _synth_edge(
+def _synth_kokoro(
     text: str,
     language: str,
     voice: str | None,
@@ -116,25 +114,20 @@ def _synth_edge(
     workdir: Path,
     progress: ProgressCallback,
 ) -> None:
-    resolved = _resolve_edge_voice(language, voice)
-    chunks = split_text(text, get_settings().edge_chunk_chars)
+    from app.services import kokoro as kokoro_svc
+
+    resolved = _resolve_kokoro_voice(language, voice)
+    chunks = split_text(text, get_settings().kokoro_chunk_chars)
     files: list[Path] = []
     for i, chunk in enumerate(chunks):
         if progress:
-            progress(10 + int((i / len(chunks)) * 80), f"edge-tts {i + 1}/{len(chunks)}")
-        mp3 = workdir / f"edge_{i}.mp3"
-        try:
-            asyncio.run(_edge_chunk(chunk, resolved, mp3))
-        except Exception as exc:
-            if "403" in str(exc):
-                raise RuntimeError(
-                    "Microsoft Edge-TTS blocked (403). Use a proxy or switch to Azure Speech."
-                ) from exc
-            raise
-        if not mp3.exists() or mp3.stat().st_size == 0:
-            raise RuntimeError(f"edge-tts produced no audio for chunk {i + 1}/{len(chunks)}")
-        files.append(mp3)
-    merge(files, dest, "mp3", fmt, workdir)
+            progress(10 + int((i / len(chunks)) * 80), f"kokoro {i + 1}/{len(chunks)}")
+        wav = workdir / f"kokoro_{i}.wav"
+        kokoro_svc.synth_to_wav(language, chunk, resolved, wav)
+        if not wav.exists() or wav.stat().st_size == 0:
+            raise RuntimeError(f"kokoro produced no audio for chunk {i + 1}/{len(chunks)}")
+        files.append(wav)
+    merge(files, dest, "wav", fmt, workdir)
 
 
 def generate_tts(
@@ -165,7 +158,7 @@ def generate_tts(
         if is_vietnamese(language):
             _synth_vieneu(text, voice, dest, fmt, workdir, progress, voice_data)
         else:
-            _synth_edge(text, language, voice, dest, fmt, workdir, progress)
+            _synth_kokoro(text, language, voice, dest, fmt, workdir, progress)
         if progress:
             progress(100, "Completed")
         return dest

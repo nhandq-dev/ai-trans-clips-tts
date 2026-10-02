@@ -34,7 +34,7 @@ Authorized caller (main API)
 Caddy on Singapore VPS (:443)
   -> reverse proxy to 127.0.0.1:8004 (loopback; worker port is not public)
 FastAPI tts-worker container
-  -> VieNeu (Vietnamese) / edge-tts (other languages) / ffmpeg
+  -> VieNeu (Vietnamese) / Kokoro-82M via kokoro-onnx (other languages) / ffmpeg
 ```
 
 Key decisions:
@@ -166,7 +166,9 @@ TTS runtime:
 | `FFMPEG_BIN` | ffmpeg binary path |
 | `VIENEU_BACKEND` | ONNX backend selection |
 | `VIENEU_DEFAULT_VOICE` | Default Vietnamese voice |
-| `EDGE_FALLBACK_VOICE` | Fallback non-Vietnamese voice |
+| `KOKORO_MODEL_DIR` | Where `kokoro-v1.0.onnx` + `voices-v1.0.bin` live (blank = `HF_HOME/kokoro/`); auto-downloaded on first run |
+| `KOKORO_DEFAULT_VOICE` | Default non-Vietnamese voice (`af_heart`) |
+| `KOKORO_CHUNK_CHARS`, `KOKORO_SPEED` | Chunking and speed for Kokoro synthesis |
 
 Security:
 
@@ -286,8 +288,8 @@ Suggested starting point:
 
 Why:
 
-- VieNeu inference and ffmpeg are CPU-bound.
-- Hugging Face cache and temp audio files need disk headroom.
+- VieNeu and Kokoro inference plus ffmpeg are CPU-bound.
+- Hugging Face cache, the Kokoro model (~330 MB), and temp audio files need disk headroom.
 - A too-small VPS spends more time swapping than synthesizing.
 
 If budget is tight, start with 2 vCPU / 4 GB RAM and keep concurrency low.

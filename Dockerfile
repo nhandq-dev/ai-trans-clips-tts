@@ -13,7 +13,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=uv /uv /uvx /bin/
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg curl \
+    && apt-get install -y --no-install-recommends ffmpeg curl espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -32,7 +32,7 @@ USER worker
 
 EXPOSE 8004
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8004/health/live || exit 1
 
 CMD ["/app/docker-entrypoint.sh"]

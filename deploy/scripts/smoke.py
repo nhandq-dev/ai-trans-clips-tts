@@ -93,9 +93,23 @@ def main() -> int:
     ).encode()
     status, content_type, data = call("POST", "/v1/tts", body=body, content_type="application/json")
     if status != 200 or content_type != "audio/mpeg" or len(data) < 1000:
-        print(f"FAIL POST /v1/tts -> {status} {content_type} {len(data)} bytes", file=sys.stderr)
+        print(
+            f"FAIL POST /v1/tts (vi) -> {status} {content_type} {len(data)} bytes", file=sys.stderr
+        )
         return 1
-    print(f"OK   POST /v1/tts -> {status} {content_type} ({len(data)} bytes)")
+    print(f"OK   POST /v1/tts (vi) -> {status} {content_type} ({len(data)} bytes)")
+
+    body = json.dumps(
+        {"text": "Hello, this is the Kokoro engine test.", "language": "en", "format": "mp3"}
+    ).encode()
+    status, content_type, data = call("POST", "/v1/tts", body=body, content_type="application/json")
+    if status != 200 or content_type != "audio/mpeg" or len(data) < 1000:
+        print(
+            f"FAIL POST /v1/tts (en/Kokoro) -> {status} {content_type} {len(data)} bytes",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"OK   POST /v1/tts (en) -> {status} {content_type} ({len(data)} bytes)")
 
     print("smoke test passed")
     return 0

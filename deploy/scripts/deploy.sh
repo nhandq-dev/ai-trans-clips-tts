@@ -14,7 +14,9 @@ STATE_DIR="${COMPOSE_DIR}/releases"
 CURRENT_TAG_FILE="${STATE_DIR}/current_tag"
 PREVIOUS_TAG_FILE="${STATE_DIR}/previous_tag"
 READY_URL="${READY_URL:-http://127.0.0.1:8004/health/ready}"
-MAX_ATTEMPTS="${MAX_ATTEMPTS:-30}"
+# Long enough for a first boot that downloads the Kokoro model (~330MB) into
+# ./data/hf-cache before uvicorn is ready to serve /health/ready.
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-75}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-2}"
 
 mkdir -p "${STATE_DIR}"

@@ -14,8 +14,9 @@ Uvicorn, deployed as containers behind Caddy on the same hostname (separated by 
 
 ## TTS worker
 
-Text-to-speech: **VieNeu** for Vietnamese, **edge-tts** for other languages, **ffmpeg** for
-merging/transcoding.
+Text-to-speech: **VieNeu** for Vietnamese, **Kokoro-82M** (via `kokoro-onnx`, ONNX Runtime) for all
+other languages, **ffmpeg** for merging/transcoding. Both engines are fully on-device — no external
+TTS API, no rate limits or Microsoft 403 blocking.
 
 - API: `GET /health/live`, `GET /health/ready`, `GET /v1/voices`, `POST /v1/tts`
 - Auth: HMAC-signed requests on `/v1/*`; health endpoints are unauthenticated.
@@ -24,6 +25,7 @@ merging/transcoding.
 
 - Python 3.12 and [`uv`](https://docs.astral.sh/uv/)
 - `ffmpeg` on `PATH`
+- `espeak-ng` on `PATH` (Kokoro G2P; `brew install espeak-ng` on macOS)
 
 ## Local development
 
@@ -56,7 +58,7 @@ production unless docs are disabled.
 { "text": "Xin chào", "language": "vi", "voice": "Adam", "format": "mp3" }
 ```
 
-- `language` must be one of the catalog languages (`vi`, `en`, `zh`, `ja`, `ko`, `fr`, `de`, `es`).
+- `language` must be one of the catalog languages (`vi`, `en`, `zh`, `ja`, `es`, `fr`, `hi`, `it`, `pt`).
 - `voice` must belong to the selected language/engine (see `/v1/voices`).
 - `text` is limited by `MAX_TEXT_LENGTH`; synchronous requests also respect `SYNC_MAX_TEXT_LENGTH`.
 - `format` is `mp3` or `wav`.
@@ -136,7 +138,7 @@ Environment variables (see `.env.example` for the full contract):
 | `HF_HOME` | model cache directory |
 | `FFMPEG_BIN` | ffmpeg binary (defaults to `PATH`) |
 | `VIENEU_BACKEND`, `VIENEU_DEFAULT_VOICE`, `VIENEU_CHUNK_CHARS` | VieNeu settings |
-| `EDGE_FALLBACK_VOICE`, `EDGE_CHUNK_CHARS` | edge-tts settings |
+| `KOKORO_MODEL_DIR`, `KOKORO_DEFAULT_VOICE`, `KOKORO_CHUNK_CHARS`, `KOKORO_SPEED`, `KOKORO_MODEL_URL`, `KOKORO_VOICES_URL` | Kokoro-82M settings (model auto-downloads on first run) |
 | `HMAC_KEYS_JSON` | JSON map `{ keyId: secret }` the worker accepts |
 | `HMAC_MAX_SKEW_SECONDS`, `HMAC_NONCE_TTL_SECONDS` | replay protection |
 | `REQUEST_MAX_BODY_BYTES` | app-level body cap |
@@ -144,7 +146,7 @@ Environment variables (see `.env.example` for the full contract):
 | `S3_REGION`, `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE` | S3/R2 object storage for cloned voices |
 | `FFPROBE_BIN` | ffprobe binary (defaults to `PATH`) |
 | `REQUEST_ID_HEADER`, `ACCESS_LOG_ENABLED` | tracing + access logs |
-| `READINESS_WARMUP` | warm the VieNeu model on boot |
+| `READINESS_WARMUP` | warm the VieNeu + Kokoro models on boot |
 
 ## Tests and lint
 

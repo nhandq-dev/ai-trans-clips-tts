@@ -162,7 +162,7 @@ async def _call_tts(text: str, language: str, voice: str | None, dest: Path) -> 
     try:
         from cache import get_cache, put_cache, tts_cache_key
 
-        engine = "vieneu" if language == "vi" else "edge-tts"
+        engine = "vieneu" if language == "vi" else "kokoro"
         _key = tts_cache_key(text, language, voice, engine)
         _cached = get_cache(_key)
         if _cached:
@@ -187,7 +187,7 @@ async def _call_tts(text: str, language: str, voice: str | None, dest: Path) -> 
     try:
         from cache import put_cache, tts_cache_key
 
-        engine = "vieneu" if language == "vi" else "edge-tts"
+        engine = "vieneu" if language == "vi" else "kokoro"
         put_cache(tts_cache_key(text, language, voice, engine), content)
     except Exception:
         pass

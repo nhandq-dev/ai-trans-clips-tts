@@ -38,7 +38,7 @@ def test_tts_key_varies_by_voice_and_engine():
     a = cache.tts_cache_key("hi", "vi", "Minh Đức", "vieneu")
     b = cache.tts_cache_key("hi", "vi", "Minh Đức", "vieneu")
     c = cache.tts_cache_key("hi", "vi", "Other", "vieneu")
-    d = cache.tts_cache_key("hi", "vi", "Minh Đức", "edge-tts")
+    d = cache.tts_cache_key("hi", "vi", "Minh Đức", "kokoro")
     assert a == b
     assert a != c
     assert a != d

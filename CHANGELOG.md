@@ -6,6 +6,29 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- Kokoro-82M TTS via `kokoro-onnx` (ONNX Runtime) replacing edge-tts: on-device for all
+  non-Vietnamese languages, no external TTS API. Model files (`kokoro-v1.0.onnx` +
+  `voices-v1.0.bin`) auto-download to `KOKORO_MODEL_DIR`/`HF_HOME/kokoro/` on first run.
+- New languages from Kokoro: Hindi, Italian, Brazilian Portuguese (dropping Korean and German,
+  which Kokoro does not support). Catalog is now derived from a single `_LANG_META`/`_KOKORO_VOICES`
+  source of truth.
+
+### Changed
+
+- `LANGUAGES` is now `vi` (VieNeu) + the 8 Kokoro languages: `en`, `zh`, `ja`, `es`, `fr`, `hi`,
+  `it`, `pt`. Pipeline-worker TTS cache key uses `kokoro` as the engine label, invalidating cached
+  edge-tts audio.
+- `Dockerfile` installs `espeak-ng` (Kokoro G2P); healthcheck start period raised to 90s for the
+  first-boot model download.
+- Docs and env examples updated: `EDGE_*` settings replaced by `KOKORO_*`.
+
+### Removed
+
+- edge-tts dependency and the entire edge synthesis path (including the 403 fallback error).
+- Korean (`ko`) and German (`de`) from the language catalog.
+
+### Added
+
 - Custom (cloned) Vietnamese voices: `POST /v1/voices/clone`, `DELETE /v1/voices/clone/{voice_id}`,
   and `GET /v1/voices/clone/{voice_id}/sample`. References and generated samples are stored in
   S3-compatible object storage (Cloudflare R2) under `custom-voices/{owner}/{voice_id}/`, scoped by

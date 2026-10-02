@@ -154,7 +154,7 @@ def test_process_job_completes_and_mirrors_progress(monkeypatch):
 
 
 def test_process_job_records_failure(monkeypatch):
-    _fake_synthesis(monkeypatch, fail=RuntimeError("edge-tts blocked (403)"))
+    _fake_synthesis(monkeypatch, fail=RuntimeError("kokoro inference failed"))
 
     async def scenario():
         from app.services.job_runner import process_job
@@ -168,7 +168,7 @@ def test_process_job_records_failure(monkeypatch):
         failed = await store.get(job.id)
         assert failed is not None
         assert failed.status == JOB_FAILED
-        assert "403" in (failed.error or "")
+        assert "failed" in (failed.error or "")
 
     asyncio.run(scenario())
 
