@@ -81,10 +81,13 @@ async def fit_to_slot(
     else:  # ratio < min_speed
         speed = min_speed
         fits = False
-        # slow down to min_speed, then pad to fill slot
-        # apad will pad with silence to exactly slot
-        filter_a = f"{_atempo_filter(speed)},apad,atrim=duration={slot:.3f}"
-        target_dur = slot
+        # Slow down to min_speed, then pad. Never pad a short sentence into a
+        # huge (Gemini-inflated) slot: cap the pad at the slowed clip plus a small
+        # buffer, so a one-line line does not become a minute of silence.
+        slowed = tts_dur / min_speed
+        pad_to = min(slot, slowed + 0.6)
+        filter_a = f"{_atempo_filter(speed)},apad,atrim=duration={pad_to:.3f}"
+        target_dur = pad_to
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(dst) + ".tmp.wav")
