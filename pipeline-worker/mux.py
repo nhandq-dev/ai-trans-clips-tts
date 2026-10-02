@@ -276,7 +276,7 @@ async def render_translated_video(
         font = os.getenv("WATERMARK_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
         # White, 40% opacity, moving diagonally across the middle of the frame.
         parts.append(
-            f"drawtext=fontfile={font}:textfile='{wm}':fontcolor=white@0.4:fontsize={fs}:"
+            f"[{vlabel}]drawtext=fontfile={font}:textfile='{wm}':fontcolor=white@0.4:fontsize={fs}:"
             f"x='mod(t*W/9,W+tw)-tw':y='mod(t*H/12,H+th)-th'[wmv]"
         )
         vlabel = "wmv"
