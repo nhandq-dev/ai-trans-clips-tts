@@ -321,6 +321,8 @@ async def run_pipeline(job_id: str):
                 job.target_language,
                 work_dir=work / "chunks",
                 tier=getattr(job, "gemini_tier", None),
+                context=job.options.get("context") or "",
+                glossary=job.options.get("glossary") or "",
             )
             # write outputs
             write_outputs(result, work)
