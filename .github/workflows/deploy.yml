@@ -94,14 +94,22 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 "$VPS_USER@$VPS_HOST" \
             "SMOKE_BASE_URL=https://tts-api.aitransclips.com python3 /opt/tts-worker/scripts/smoke.py"
 
-      - name: Capture tts-worker logs
+      - name: Capture tts-worker logs and host memory
         if: always()
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          ssh -i ~/.ssh/id_ed25519 "$VPS_USER@$VPS_HOST" \
-            "docker logs --tail 150 tts-worker-tts-worker-1 2>&1 || true"
+          ssh -i ~/.ssh/id_ed25519 "$VPS_USER@$VPS_HOST" "
+            echo '===== tts-worker container logs ====='
+            docker logs --tail 150 tts-worker-tts-worker-1 2>&1 || true
+            echo '===== free -h ====='
+            free -h
+            echo '===== docker stats ====='
+            docker stats --no-stream --format 'table {{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.CPUPerc}}' || true
+            echo '===== top RSS ====='
+            ps -eo pid,rss,comm --sort=-rss | head -12
+          "
 
       - name: Verify public endpoint
         run: curl -fsS --retry 5 --retry-delay 5 https://tts-api.aitransclips.com/health/live
