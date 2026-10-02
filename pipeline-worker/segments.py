@@ -8,7 +8,15 @@ Gemini returns ``segments`` with start/end in seconds. We normalise:
 
 from __future__ import annotations
 
+import os
+
 from schemas import Segment
+
+# Gemini sometimes inflates a segment's `end` (e.g. one short sentence spanning
+# a full minute). Cap the slot so neither the burned subtitle nor the dubbed
+# audio pads a sentence into a huge stretch of silence. Long real sentences are
+# usually still under this; tune via SUBTITLE_MAX_SEGMENT_DURATION.
+MAX_SEGMENT_DURATION = float(os.getenv("SUBTITLE_MAX_SEGMENT_DURATION", "8"))
 
 
 def normalize_segments(segments: list[Segment], *, min_duration: float = 0.4) -> list[Segment]:
@@ -58,4 +66,9 @@ def normalize_segments(segments: list[Segment], *, min_duration: float = 0.4) ->
             else:
                 merged.append(cur)
             i += 1
+    # Clamp implausibly long segments so a single sentence never claims a huge
+    # slot (Gemini's `end` is the unreliable part, not `start`).
+    for s in merged:
+        if s.end - s.start > MAX_SEGMENT_DURATION:
+            s.end = s.start + MAX_SEGMENT_DURATION
     return merged
