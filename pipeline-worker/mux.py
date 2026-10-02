@@ -204,6 +204,7 @@ async def render_translated_video(
     out_path: str | Path,
     *,
     blur_box: dict | None = None,
+    watermark: str | None = None,
     original_volume_db: int = -20,
     mute_original: bool = False,
     subtitle_style: dict | None = None,
@@ -211,7 +212,8 @@ async def render_translated_video(
     """Single-pass render (plan/009 T3.5): blur old subs + burn new ASS + mix audio.
 
     Only one video encode. When ``ass_path`` is None no burn happens; when
-    ``blur_box`` is None no blur happens.
+    ``blur_box`` is None no blur happens. ``watermark`` is drawn last, moving
+    diagonally across the frame (white, 40% opacity).
     """
     video_path, dub_path, out_path = Path(video_path), Path(dub_path), Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,6 +221,7 @@ async def render_translated_video(
 
     parts: list[str] = []
     vlabel = "0:v"
+    dims: dict | None = None
 
     if blur_box:
         dims = await _video_size(video_path)
@@ -260,6 +263,23 @@ async def render_translated_video(
         ass = str(Path(ass_path).resolve()).replace("\\", "/").replace(":", "\\:")
         parts.append(f"[{vlabel}]ass='{ass}'[vass]")
         vlabel = "vass"
+
+    if watermark:
+        if dims is None:
+            dims = await _video_size(video_path)
+        vh = int(dims["height"]) if dims else 1080
+        fs = max(22, min(48, int(vh * 0.04)))
+        # drawtext reads the text from a file so no ffmpeg escaping is needed.
+        wm_file = out_path.parent / "watermark.txt"
+        wm_file.write_text(watermark, encoding="utf-8")
+        wm = str(wm_file).replace("\\", "/").replace(":", "\\:")
+        font = os.getenv("WATERMARK_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+        # White, 40% opacity, moving diagonally across the middle of the frame.
+        parts.append(
+            f"drawtext=fontfile={font}:textfile='{wm}':fontcolor=white@0.4:fontsize={fs}:"
+            f"x='mod(t*W/9,W+tw)-tw':y='mod(t*H/12,H+th)-th'[wmv]"
+        )
+        vlabel = "wmv"
 
     if not parts:
         # no video filters: copy video

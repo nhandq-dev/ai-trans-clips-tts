@@ -468,6 +468,7 @@ async def run_pipeline(job_id: str):
                 ass_path,
                 translated,
                 blur_box=blur_box,
+                watermark=job.options.get("watermark"),
                 original_volume_db=job.options.get("original_audio_volume_db", -20),
                 mute_original=job.options.get("mute_original", False),
             )
