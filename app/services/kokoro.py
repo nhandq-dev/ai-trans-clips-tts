@@ -64,6 +64,9 @@ def _ensure_file(local: Path, url: str, default_url: str) -> Path:
     """
     if local.exists():
         return local
+    # The model dir may not exist yet on first boot (warmup or first request)
+    # — create it before opening the lock file, or the lock open raises ENOENT.
+    local.parent.mkdir(parents=True, exist_ok=True)
     lock = local.with_name(local.name + ".lock")
     with lock.open("wb"):
         # A fresh file descriptor per creation gets us the open lock.
