@@ -80,6 +80,8 @@ def _prompt(
     return (
         f"{src} Target language: {target_language}.\n"
         f"Topic/tone: {context or 'general'}. Glossary: {glossary or 'none'}.\n"
+        "Glossary entries are canonical names: use them for the matching person, "
+        "character or term in the source, and do not translate them differently.\n"
         "Transcribe the audio and translate it.\n"
         'Output JSON only: {"lang":"<ISO code or unknown>",'
         '"s":[[start,end,"original","translation"],...]}\n'
@@ -290,7 +292,7 @@ async def transcribe_and_translate(
                 api_key[-4:],
                 target_language,
             )
-            prompt = _prompt(source_language, target_language)
+            prompt = _prompt(source_language, target_language, context, glossary)
             lang, segments = await _call_once(_client(api_key), model, audio_bytes, prompt)
 
             # Post-processing: sort, drop empty, merge <0.4s (plan/009 T1.2)

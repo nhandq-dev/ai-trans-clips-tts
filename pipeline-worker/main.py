@@ -233,6 +233,8 @@ class TranslateOptions(BaseModel):
     burn_subtitles: bool = True
     subtitle_style: dict | None = None
     watermark: str | None = Field(default=None, max_length=64)
+    context: str | None = Field(default=None, max_length=30)
+    glossary: str | None = Field(default=None, max_length=30)
     min_speed: float = Field(default=0.8, ge=0.5, le=1.0)
     max_speed: float = Field(default=1.3, ge=1.0, le=2.0)
 

@@ -89,6 +89,8 @@ async def transcribe_chunked(
     target_language: str,
     work_dir: str | Path | None = None,
     tier: str | None = None,
+    context: str = "",
+    glossary: str = "",
 ) -> TranscriptionResult:
     """Chunk, transcribe each chunk in parallel, merge with offset.
 
@@ -99,7 +101,12 @@ async def transcribe_chunked(
     duration = await _probe_duration(audio_path)
     if duration <= CHUNK_DURATION_SECONDS:
         return await transcribe_and_translate(
-            audio_path, source_language, target_language, tier=tier
+            audio_path,
+            source_language,
+            target_language,
+            context=context,
+            glossary=glossary,
+            tier=tier,
         )
 
     # need chunking
@@ -114,7 +121,14 @@ async def transcribe_chunked(
 
     async def _one(chunk: Path, offset: float) -> TranscriptionResult:
         async with sem:
-            res = await transcribe_and_translate(chunk, source_language, target_language, tier=tier)
+            res = await transcribe_and_translate(
+                chunk,
+                source_language,
+                target_language,
+                context=context,
+                glossary=glossary,
+                tier=tier,
+            )
             for seg in res.segments:
                 seg.start += offset
                 seg.end += offset
