@@ -100,6 +100,10 @@ def _prompt(
         '- "original": verbatim speech in the source language. Only audible speech; '
         'never invent text; use "[?]" if unclear.\n'
         f'- "translation": natural {target_language}, max ~42 chars/line, follow the glossary.\n'
+        "- Numbers, prices and amounts must be spelled out in full words so "
+        'text-to-speech reads them correctly (e.g. "10.000đ" -> "mười nghìn đồng", '
+        '"25,5 triệu" -> "hai mươi lăm triệu rưỡi"). Never keep thousands '
+        "separators, dots or decimal points in numbers.\n"
         'No speech: {"lang":"unknown","s":[]}'
     )
 
