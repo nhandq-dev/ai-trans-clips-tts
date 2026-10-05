@@ -39,6 +39,10 @@ OCR_MAX_DURATION = float(os.getenv("SUBTITLE_OCR_MAX_DURATION", "120"))
 OCR_INTERVAL = float(os.getenv("SUBTITLE_OCR_INTERVAL", "2"))
 OCR_CONFIRM_SECONDS = float(os.getenv("SUBTITLE_OCR_CONFIRM_SECONDS", "2"))
 
+# Upper bound (px) for the detected subtitle band height; shared with mux.py so
+# the blur band and the box never disagree. 120 covers large two-line captions.
+MAX_BLUR_HEIGHT = int(os.getenv("SUBTITLE_MAX_BLUR_HEIGHT", "120"))
+
 _OCR_READER: object | None = None
 _OCR_READER_LOCK = threading.Lock()
 
@@ -332,7 +336,7 @@ def _detect_with_easyocr(video_path: Path, position: str) -> dict | None:
     else:
         result_w = width - 2 * padding
         result_x = padding
-    result_h = min(90, max(1, height - result_y))
+    result_h = min(MAX_BLUR_HEIGHT, max(1, height - result_y))
 
     logger.info(
         "OCR subtitle region: x=%d y=%d w=%d h=%d (from %d detections in dominant line, %d total)",
