@@ -1,8 +1,9 @@
 """Audio chunking for long videos (plan/009 T1.3).
 
-Splits a FLAC into ~8-10 minute chunks so Gemini can handle 25-minute videos.
-Each chunk is transcribed in parallel (2-3 concurrent), then segments are
-re-based with the chunk offset so the timeline is continuous.
+Splits a FLAC into short chunks (default ~3 min) so Gemini's timestamps stay
+accurate — very long chunks make it drop whole sections, which shows up as
+minutes of silence in the dub. Each chunk is transcribed in parallel, then
+segments are re-based with the REAL chunk offset so the timeline is continuous.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 from gemini import transcribe_and_translate
 from schemas import Segment, TranscriptionResult
 
-CHUNK_DURATION_SECONDS = int(os.getenv("CHUNK_DURATION_SECONDS", "510"))  # ~8.5 min
+CHUNK_DURATION_SECONDS = int(os.getenv("CHUNK_DURATION_SECONDS", "180"))  # ~3 min
 MAX_PARALLEL = int(os.getenv("GEMINI_PARALLEL", "3"))
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 
@@ -134,8 +135,14 @@ async def transcribe_chunked(
                 seg.end += offset
             return res
 
-    # compute offsets as index * CHUNK_DURATION_SECONDS (segment muxer splits exactly there)
-    offsets: list[float] = [i * CHUNK_DURATION_SECONDS for i in range(len(chunks))]
+    # Offsets are the REAL cumulative chunk durations, not index * nominal duration:
+    # the segment muxer does not split at exactly CHUNK_DURATION_SECONDS, so assuming
+    # it does drifts the whole timeline and can create phantom silence gaps.
+    offsets: list[float] = []
+    _acc = 0.0
+    for chunk in chunks:
+        offsets.append(_acc)
+        _acc += await _probe_duration(chunk)
 
     tasks = [_one(chunk, off) for chunk, off in zip(chunks, offsets, strict=True)]
     results: list[TranscriptionResult] = await asyncio.gather(*tasks)
@@ -145,10 +152,17 @@ async def transcribe_chunked(
     detected_language = source_language if source_language != "auto" else "unknown"
     for res in results:
         all_segments.extend(res.segments)
-        if detected_language == "unknown" and res.detected_language not in ("unknown", ""):
+        if detected_language == "unknown" and res.detected_language not in (
+            "unknown",
+            "",
+        ):
             detected_language = res.detected_language
     # if still unknown and we have segments, take first result's detected
-    if detected_language == "unknown" and results and results[0].detected_language != "unknown":
+    if (
+        detected_language == "unknown"
+        and results
+        and results[0].detected_language != "unknown"
+    ):
         detected_language = results[0].detected_language
 
     return TranscriptionResult(
