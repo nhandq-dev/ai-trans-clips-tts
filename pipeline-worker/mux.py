@@ -242,7 +242,7 @@ async def render_translated_video(
             # the OCR box can be far too tall, making the blur cover half the frame.
             # Cap the band height and anchor it to the box bottom (the text sits at
             # the bottom), so a tiny row of subtitles does not blur the whole video.
-            max_blur_h = int(os.getenv("SUBTITLE_MAX_BLUR_HEIGHT", "100"))
+            max_blur_h = int(os.getenv("SUBTITLE_MAX_BLUR_HEIGHT", "120"))
             if h > max_blur_h:
                 y += h - max_blur_h
                 h = max_blur_h
