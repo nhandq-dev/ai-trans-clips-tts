@@ -130,6 +130,19 @@ async def transcribe_chunked(
                 glossary=glossary,
                 tier=tier,
             )
+            # A chunk that clearly has content occasionally comes back empty
+            # (model glitch) — retry once so a long video's tail is not left silent.
+            if not res.segments:
+                chunk_dur = await _probe_duration(chunk)
+                if chunk_dur > 3.0:
+                    res = await transcribe_and_translate(
+                        chunk,
+                        source_language,
+                        target_language,
+                        context=context,
+                        glossary=glossary,
+                        tier=tier,
+                    )
             for seg in res.segments:
                 seg.start += offset
                 seg.end += offset
@@ -158,11 +171,7 @@ async def transcribe_chunked(
         ):
             detected_language = res.detected_language
     # if still unknown and we have segments, take first result's detected
-    if (
-        detected_language == "unknown"
-        and results
-        and results[0].detected_language != "unknown"
-    ):
+    if detected_language == "unknown" and results and results[0].detected_language != "unknown":
         detected_language = results[0].detected_language
 
     return TranscriptionResult(

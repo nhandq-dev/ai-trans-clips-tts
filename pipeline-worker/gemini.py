@@ -91,11 +91,20 @@ def _prompt(
         '"our currency" as the target currency with amounts converted '
         "(e.g. RMB -> VND/USD).\n"
         "- Clarify proper nouns, units and culture-specific terms for the target language.\n"
-        "Timing:\n"
+        "Timing (the timeline MUST be one clean sequential chain):\n"
         '- start/end are strings "MM:SS.d" relative to the start of this clip.\n'
-        "- start = first word begins; end = last word ends. Exclude silence, music, pauses.\n"
-        "- Sorted by start. No overlap (end <= next start). Gaps are allowed.\n"
-        "- One sentence/phrase per segment, 1-7 seconds; split long sentences at natural pauses.\n"
+        "- start = the moment the first word begins; end = the moment the last word "
+        "ends. Exclude leading/trailing silence, music and pauses.\n"
+        "- The segment list is a SINGLE chain: the first segment starts at 00:00.0, "
+        "and for every i the next segment starts exactly where the previous one "
+        "ended (end[i] == start[i+1], tolerance < 0.3s). Never leave gaps, never "
+        "overlap, and never give two segments the same start time.\n"
+        "- Each segment must reflect the speech actually present in its own window: "
+        "do NOT pad a sentence to fill a window, and do NOT stretch short speech "
+        "over a long window.\n"
+        "- Sorted by start, strictly increasing.\n"
+        "- One sentence/phrase per segment, 1-7 seconds; split long sentences at "
+        "natural pauses into consecutive segments.\n"
         "Content:\n"
         '- "original": verbatim speech in the source language. Only audible speech; '
         'never invent text; use "[?]" if unclear.\n'

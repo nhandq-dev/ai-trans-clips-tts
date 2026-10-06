@@ -66,9 +66,28 @@ def normalize_segments(segments: list[Segment], *, min_duration: float = 0.4) ->
             else:
                 merged.append(cur)
             i += 1
-    # Clamp implausibly long segments so a single sentence never claims a huge
-    # slot (Gemini's `end` is the unreliable part, not `start`).
+    # Enforce a strictly sequential, non-overlapping timeline. Even when the
+    # model reports overlapping or duplicate timestamps (two segments both
+    # starting at 0.0, or a segment starting mid-way through the previous one),
+    # the dub/subtitle track must be one clean chain: each segment starts exactly
+    # where the previous one ended. Degenerate segments are folded into their
+    # predecessor so no caption content is lost.
+    sequential: list[Segment] = []
+    anchor = 0.0
     for s in merged:
+        if s.start < anchor:
+            s.start = anchor
+        if s.end <= s.start:
+            if sequential:
+                prev = sequential[-1]
+                prev.target_text = f"{prev.target_text} {s.target_text}".strip()
+                prev.source_text = f"{prev.source_text} {s.source_text}".strip()
+            else:
+                s.end = s.start + 0.5
+                sequential.append(s)
+            continue
         if s.end - s.start > MAX_SEGMENT_DURATION:
             s.end = s.start + MAX_SEGMENT_DURATION
-    return merged
+        sequential.append(s)
+        anchor = s.end
+    return sequential
