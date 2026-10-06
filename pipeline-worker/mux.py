@@ -37,11 +37,17 @@ async def probe_duration(path: str | Path) -> float:
 
 
 async def build_dub_track(
-    aligned_clips: list[tuple[Path, float]],  # (wav_path, start_seconds)
+    aligned_clips: list[tuple[Path, float]],  # (wav_path, slot_start_seconds)
     video_duration: float,
     out_path: str | Path,
 ) -> Path:
-    """Build dub.wav by placing each clip at ``start`` on a silent track."""
+    """Build dub.wav by placing each clip on a silent track.
+
+    Clips are laid out with a monotonic cursor (`start = max(slot_start,
+    previous_clip_end)`) so two clips can never overlap — a clip that somehow
+    overruns its slot pushes the next one, it never mixes over it. With align's
+    exact-length fit, `start` equals `slot_start` and there is no drift.
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(out_path) + ".tmp.wav")
@@ -72,6 +78,16 @@ async def build_dub_track(
 
     # Input 0 is a silent track as long as the video; each clip is a further
     # input delayed to its start time, then everything is mixed with amix.
+    # Probe every clip up front (concurrently) so we can compute an overlap-free
+    # placement without blocking on ffprobe in the middle of filter building.
+    durations = await asyncio.gather(*(probe_duration(wav) for wav, _ in aligned_clips))
+    placements: list[tuple[Path, float]] = []
+    cursor = 0.0
+    for (wav, slot_start), dur in zip(aligned_clips, durations, strict=False):
+        start = max(slot_start, cursor)
+        placements.append((wav, start))
+        cursor = start + (dur or 0.0)
+
     filter_parts = []
     cmd = [
         FFMPEG_BIN,
@@ -81,16 +97,16 @@ async def build_dub_track(
         "-i",
         f"anullsrc=r=48000:cl=mono:d={video_duration:.3f}",
     ]
-    for wav, _ in aligned_clips:
+    for wav, _ in placements:
         cmd.extend(["-i", str(wav)])
     # [1:a]adelay=..[a1]; ...; [0:a][a1][a2]amix=inputs=N:normalize=0
-    for idx, (_, start) in enumerate(aligned_clips, start=1):
+    for idx, (_, start) in enumerate(placements, start=1):
         delay_ms = int(round(start * 1000))
         # adelay needs delay for each channel: 1 channel -> delay|delay
         filter_parts.append(f"[{idx}:a]adelay={delay_ms}|{delay_ms}[a{idx}]")
     # amix all
-    amix_inputs = "".join(f"[a{idx}]" for idx in range(1, len(aligned_clips) + 1))
-    n_inputs = len(aligned_clips) + 1
+    amix_inputs = "".join(f"[a{idx}]" for idx in range(1, len(placements) + 1))
+    n_inputs = len(placements) + 1
     filter_parts.append(
         f"[0:a]{amix_inputs}amix=inputs={n_inputs}"
         ":normalize=0:duration=longest:dropout_transition=0[dub]"
