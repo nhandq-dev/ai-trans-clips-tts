@@ -187,6 +187,18 @@ async def _update(job_id: str, stage: str, progress: int | None = None, **fields
     await jobs.update_job(job_id, stage=stage, progress=progress, **fields)
 
 
+async def _out_timeline(work: Path, video_duration: float) -> tuple[float, float]:
+    """The slow factor + output duration persisted by the aligning stage."""
+    S = 1.0
+    p = work / "timeline.json"
+    if p.exists():
+        try:
+            S = float(json.loads(p.read_text(encoding="utf-8")).get("factor", 1.0))
+        except Exception:
+            pass
+    return S, S * video_duration
+
+
 def enforce_max_duration(duration_seconds: float, max_seconds: int | None) -> None:
     """Reject a source longer than the plan allows (plan/015).
 
@@ -384,40 +396,86 @@ async def run_pipeline(job_id: str):
             raise RuntimeError("no TTS clips generated")
 
         # ------------------------------------------------------------------
-        # Stage: aligning (fit to slot)
+        # Stage: aligning (fit to slot) — build the dub-first output timeline
         # ------------------------------------------------------------------
+        # The narration usually runs up to ~1.5x longer than the source speech, so
+        # the old exact-fit approach kept squeezing the audio hard and could leave
+        # the tail silent. Now the output video is slowed by `S` and each clip is
+        # laid at its natural length, anchored to the (scaled) source timeline and
+        # pushed only when it would overlap. Segment times are rebased to the
+        # output timeline so transcripts and burned subtitles follow the dub.
+        aligned_dir = work / "aligned"
+        timeline_path = work / "timeline.json"
         if "aligning" not in job.stage_state:
             await _update(job_id, "aligning")
-            from align import fit_to_slot
+            from align import (
+                fit_to_slot,
+                narration_speedup,
+                probe_duration,
+                slow_factor_for,
+            )
 
-            aligned_dir = work / "aligned"
             aligned_dir.mkdir(parents=True, exist_ok=True)
+
+            segs = result.segments
+            n = min(len(segs), len(tts_paths))
+            durations = await asyncio.gather(*(probe_duration(tts_paths[i]) for i in range(n)))
+            total_natural = sum(durations)
+            video_duration = await probe_duration(source_mp4)
+            S = slow_factor_for(total_natural, video_duration)
+            out_duration = S * video_duration
+            speed = narration_speedup(total_natural, out_duration)
+
             aligned_clips: list[tuple[Path, float]] = []
-            for idx, seg in enumerate(result.segments):
-                if idx >= len(tts_paths):
-                    break
-                src = tts_paths[idx]
-                slot = seg.end - seg.start
-                if slot <= 0:
-                    # malformed segment timing; skip instead of failing the whole job
-                    continue
-                dst = aligned_dir / f"seg_{idx:04d}.wav"
-                if dst.exists():
-                    aligned_clips.append((dst, seg.start))
-                    continue
-                await fit_to_slot(src, dst, slot)
-                aligned_clips.append((dst, seg.start))
-            # store aligned list for mux
-            # we keep it in work dir
+            slots: list[list[float]] = []
+            cursor = 0.0
+            for i in range(n):
+                seg = segs[i]
+                target_len = durations[i] * speed
+                anchor = S * float(seg.start)
+                pos = max(anchor, cursor)
+                dst = aligned_dir / f"seg_{i:04d}.wav"
+                await fit_to_slot(tts_paths[i], dst, target_len)
+                aligned_clips.append((dst, pos))
+                cursor = pos + target_len
+                seg.start = pos
+                seg.end = pos + target_len
+                slots.append([round(pos, 3), round(target_len, 3)])
+            (work / "timeline.json").write_text(
+                json.dumps({"factor": S, "out_duration": out_duration, "slots": slots}),
+                encoding="utf-8",
+            )
+            # Re-write transcripts/SRT now that segments sit on the output timeline.
+            write_outputs(result, work)
+
             await jobs.update_job(job_id, stage_state={**job.stage_state, "aligning": "done"})
             job = await jobs.get_job(job_id)  # type: ignore
         else:
-            aligned_dir = work / "aligned"
             aligned_clips = []
+            slots: list[list[float]] = []
+            S = 1.0
+            if timeline_path.exists():
+                try:
+                    timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+                    S = float(timeline.get("factor", 1.0))
+                    slots = timeline.get("slots", [])
+                except Exception:
+                    pass
             for idx, seg in enumerate(result.segments):
+                if idx >= len(tts_paths):
+                    break
                 p = aligned_dir / f"seg_{idx:04d}.wav"
-                if p.exists():
-                    aligned_clips.append((p, seg.start))
+                if not p.exists():
+                    continue
+                if idx < len(slots):
+                    pos, length = slots[idx]
+                else:
+                    pos, length = float(seg.start), seg.end - seg.start
+                aligned_clips.append((p, float(pos)))
+                seg.start = float(pos)
+                seg.end = float(pos) + float(length)
+            if slots:
+                write_outputs(result, work)
 
         # ------------------------------------------------------------------
         # Stage: muxing (build dub + mix)
@@ -428,9 +486,10 @@ async def run_pipeline(job_id: str):
 
             async with _MUX_SEM:
                 video_duration = await probe_duration(source_mp4)
+                slow_factor, out_duration = _out_timeline(work, video_duration)
                 dub_wav = work / "dub.wav"
                 if not dub_wav.exists():
-                    await build_dub_track(aligned_clips, video_duration, dub_wav)
+                    await build_dub_track(aligned_clips, out_duration, dub_wav)
 
                 # ---- subtitles (T3.2 detect → T3.4 ass → T3.5 single-pass render) ----
                 blur_box = None
@@ -481,6 +540,7 @@ async def run_pipeline(job_id: str):
                     watermark=job.options.get("watermark"),
                     original_volume_db=job.options.get("original_audio_volume_db", -20),
                     mute_original=job.options.get("mute_original", False),
+                    slow_factor=slow_factor,
                 )
 
             # upload to S3 if configured

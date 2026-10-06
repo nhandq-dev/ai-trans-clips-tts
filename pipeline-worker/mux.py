@@ -224,12 +224,17 @@ async def render_translated_video(
     original_volume_db: int = -20,
     mute_original: bool = False,
     subtitle_style: dict | None = None,
+    slow_factor: float = 1.0,
 ) -> Path:
     """Single-pass render (plan/009 T3.5): blur old subs + burn new ASS + mix audio.
 
     Only one video encode. When ``ass_path`` is None no burn happens; when
     ``blur_box`` is None no blur happens. ``watermark`` is drawn last, moving
     diagonally across the frame (white, 40% opacity).
+
+    ``slow_factor`` > 1 slows the output video (``setpts=PTS*S``) so the
+    naturally-paced dub fits — subtitles/watermark are burned on the slowed
+    stream, and the original audio (if kept) is stretched with ``atempo``.
     """
     video_path, dub_path, out_path = Path(video_path), Path(dub_path), Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,6 +243,12 @@ async def render_translated_video(
     parts: list[str] = []
     vlabel = "0:v"
     dims: dict | None = None
+
+    # Slow the video first so every later filter (blur, ASS burn, watermark)
+    # operates on the output timeline.
+    if slow_factor > 1.0001:
+        parts.append(f"[0:v]setpts=PTS*{slow_factor:.4f}[vslow]")
+        vlabel = "vslow"
 
     if blur_box:
         dims = await _video_size(video_path)
@@ -268,9 +279,9 @@ async def render_translated_video(
         radius = max(1, min(10, min(w, h) // 2 - 1))
         chroma = max(1, min(5, radius // 2)) if radius >= 2 else 1
         parts.append(
-            f"[0:v]crop={w}:{h}:{x}:{y},"
+            f"[{vlabel}]crop={w}:{h}:{x}:{y},"
             f"boxblur=luma_radius={radius}:luma_power=2:chroma_radius={chroma}:chroma_power=2[bl];"
-            f"[0:v][bl]overlay={x}:{y}[vblur]"
+            f"[{vlabel}][bl]overlay={x}:{y}[vblur]"
         )
         vlabel = "vblur"
 
@@ -310,8 +321,12 @@ async def render_translated_video(
     if mute_original or not has_original_audio:
         parts.append("[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
     else:
+        orig = f"[0:a]volume={original_volume_db}dB[orig]"
+        if slow_factor > 1.0001:
+            # Stretch the kept original audio with the slowed video (atempo keeps pitch).
+            orig = f"[0:a]atempo={1.0 / slow_factor:.4f},volume={original_volume_db}dB[orig]"
         parts.append(
-            f"[0:a]volume={original_volume_db}dB[orig];"
+            f"{orig};"
             f"[orig][1:a]amix=inputs=2:normalize=0:duration=longest:dropout_transition=0[mixed];"
             f"[mixed]loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
         )

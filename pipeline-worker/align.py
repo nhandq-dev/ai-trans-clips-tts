@@ -38,7 +38,45 @@ ALIGN_MAX_TEMPO = float(os.getenv("ALIGN_MAX_TEMPO", "2.0"))
 # minute of silence: cap the padded length at the slowed clip plus a small buffer.
 SLOW_PAD_BUFFER_SECONDS = float(os.getenv("ALIGN_SLOW_PAD_BUFFER_SECONDS", "0.6"))
 
+# Dub-first timeline: slow the output video so the naturally-paced narration fits.
+# `fixed` always slows by DUB_SLOW_FACTOR; `auto` slows only as much as needed
+# (clamped to [DUB_SLOW_MIN, DUB_SLOW_FACTOR]); `off` keeps the old behavior.
+DUB_SLOW_MODE = os.getenv("DUB_SLOW_MODE", "fixed").strip().lower()
+DUB_SLOW_FACTOR = float(os.getenv("DUB_SLOW_FACTOR", "1.5"))
+DUB_SLOW_MIN = float(os.getenv("DUB_SLOW_MIN", "1.0"))
+# Cap on how much the narration is sped up when even the slowed video is too short.
+DUB_MAX_SPEEDUP = float(os.getenv("DUB_MAX_SPEEDUP", "1.5"))
+
 WORK_SR = "48000"
+
+
+def slow_factor_for(measured_total: float, video_duration: float) -> float:
+    """Playback slowdown so natural-speed dubbing fits without forced stretching.
+
+    ``fixed``: always ``DUB_SLOW_FACTOR`` (1.5). ``auto``: the smallest factor in
+    ``[DUB_SLOW_MIN, DUB_SLOW_FACTOR]`` that just fits the measured narration.
+    ``off``: 1.0 (old video speed, audio squeezed to fit slots).
+    """
+    if DUB_SLOW_MODE == "off":
+        return 1.0
+    if DUB_SLOW_MODE == "fixed":
+        return DUB_SLOW_FACTOR
+    if measured_total <= video_duration or video_duration <= 0:
+        return DUB_SLOW_MIN
+    return min(DUB_SLOW_FACTOR, max(DUB_SLOW_MIN, measured_total / video_duration))
+
+
+def narration_speedup(total_natural: float, out_duration: float) -> float:
+    """Multiplier applied to the natural clip lengths so the whole narration fits.
+
+    Returns 1.0 when it already fits; otherwise a value in
+    ``[1/DUB_MAX_SPEEDUP, 1)`` that speeds the narration up just enough.
+    """
+    if total_natural <= 0 or out_duration <= 0:
+        return 1.0
+    if total_natural <= out_duration:
+        return 1.0
+    return max(1.0 / DUB_MAX_SPEEDUP, out_duration / total_natural)
 
 
 async def probe_duration(path: str | Path) -> float:
