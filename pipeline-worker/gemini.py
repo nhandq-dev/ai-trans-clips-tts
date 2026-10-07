@@ -65,55 +65,83 @@ def _client(api_key: str) -> genai.Client:
         raise PermanentError(GEMINI_NOT_CONFIGURED, "no Gemini API key is configured")
     return genai.Client(api_key=api_key)
 
-
 def _prompt(
     source_language: str = "auto",
     target_language: str = "vi",
     context: str = "",
     glossary: str = "",
+    speaker_country: str = "",
 ) -> str:
     src = (
         f"Source language is '{source_language}'."
         if source_language and source_language != "auto"
         else "Detect the source language."
     )
+    is_vi = target_language.split("-")[0].lower() == "vi"
+
+    if is_vi:
+        money = (
+            "- Money: keep the original amount and add the approximate value in VND, "
+            'always introduced with "khoảng" and rounded generously '
+            '(e.g. "một trăm đô la, khoảng hai triệu rưỡi đồng"). Use an approximate '
+            "typical exchange rate; if unsure about a currency, keep it as spoken "
+            "without converting.\n"
+        )
+        numbers = (
+            "- Write every number, price and amount out in full Vietnamese words so TTS "
+            'reads it correctly (e.g. "10.000đ" -> "mười nghìn đồng", "25,5 triệu" -> '
+            '"hai mươi lăm triệu rưỡi"). No digits, thousands separators, dots or '
+            "decimal points.\n"
+            '- Percentages: "15%" -> "mười lăm phần trăm". Years: read as a full number. '
+            "Phone numbers and codes: read digit by digit. "
+            'Units: "168 m" -> "một trăm sáu mươi tám mét".\n'
+        )
+    else:
+        money = (
+            "- Money: keep amounts and currency exactly as spoken; do not convert "
+            "to any other currency.\n"
+        )
+        numbers = ""
+
     return (
         f"{src} Target language: {target_language}.\n"
         f"Topic/tone: {context or 'general'}. Glossary: {glossary or 'none'}.\n"
-        "Glossary entries are canonical names: use them for the matching person, "
-        "character or term in the source, and do not translate them differently.\n"
-        "Transcribe the audio and translate it.\n"
+        "Glossary entries are canonical: always use them for the matching person, "
+        "character or term; never translate them differently.\n"
+        "Transcribe the audio and translate it for dubbing.\n"
         'Output JSON only: {"lang":"<ISO code or unknown>",'
         '"s":[[start,end,"original","translation"],...]}\n'
-        "Localize for the target audience:\n"
-        "- Resolve ambiguous references explicitly. E.g. when the source is zh-CN, "
-        'the speaker says "my country", translate it as "my country China"; '
-        '"our currency" as the target currency with amounts converted '
-        "(e.g. RMB -> VND/USD).\n"
-        "- Clarify proper nouns, units and culture-specific terms for the target language.\n"
         "Timing:\n"
         '- start/end are strings "MM:SS.d" relative to the start of this clip.\n'
         "- start = first word begins; end = last word ends. Exclude silence, music, pauses.\n"
         "- Sorted by start. No overlap (end <= next start). Gaps are allowed.\n"
         "- One sentence/phrase per segment, 1-7 seconds; split long sentences at natural pauses.\n"
         "Content:\n"
-        '- "original": verbatim speech in the source language. Only audible speech; '
-        'never invent text; use "[?]" if unclear.\n'
-        f'- "translation": natural {target_language}, max ~42 chars/line, follow the glossary.\n'
-        "- Numbers, prices and amounts must be spelled out in full words so "
-        'text-to-speech reads them correctly (e.g. "10.000đ" -> "mười nghìn đồng", '
-        '"25,5 triệu" -> "hai mươi lăm triệu rưỡi"). Never keep thousands '
-        "separators, dots or decimal points in numbers.\n"
-        'No speech: {"lang":"unknown","s":[]}'
+        '- "original": verbatim SPOKEN words in the source language. Ignore on-screen text, '
+        "captions, titles and song lyrics. Never invent text; use \"[?]\" if unclear. "
+        "If two segments overlap by more than half, keep only the one actually heard.\n"
+        f'- "translation": natural, concise {target_language} suited to being spoken aloud '
+        "(dubbing). Be brief: drop filler, avoid padding. Follow the glossary.\n"
+        "Localization:\n"
+        f"- Speaker's country: {speaker_country or 'unknown'}.\n"
+        '- Location-relative phrases ("my country", "our city", "back home"): replace with '
+        "the real name ONLY if the speaker's country is given or unmistakable from the "
+        "audio; otherwise translate neutrally. Never guess. Prefer replacing over adding words.\n"
+        + money
+        + "- Units: keep the original unit and add metric in short form only if the target "
+        "audience would not know it.\n"
+        "- Briefly clarify proper nouns or culture-specific terms only when meaning would be "
+        "lost, in at most a few extra words.\n"
+        + numbers
+        + 'No speech: {"lang":"unknown","s":[]}'
     )
-
 
 def _to_sec(ts: str | int | float) -> float:
     """Convert MM:SS.d or HH:MM:SS.d (or a plain seconds number) to seconds."""
     if isinstance(ts, (int, float)):
         return float(ts)
     parts = str(ts).split(":")
-    if len(parts) == 2:
+    if len(parts) == 2;
         m, s = parts
         return int(m) * 60 + float(s)
     if len(parts) == 3:
