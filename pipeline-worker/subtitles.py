@@ -457,9 +457,7 @@ def write_ass(
         text = seg.target_text.replace("\n", "\\N")
         s = seg.start * time_scale
         e = seg.end * time_scale
-        lines.append(
-            f"Dialogue: 0,{_ass_time(s)},{_ass_time(e)},Default,,0,0,0,,{text}"
-        )
+        lines.append(f"Dialogue: 0,{_ass_time(s)},{_ass_time(e)},Default,,0,0,0,,{text}")
     out_path = Path(out_path)
     tmp = Path(str(out_path) + ".tmp")
     tmp.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")

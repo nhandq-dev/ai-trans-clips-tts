@@ -233,11 +233,7 @@ async def _video_fps(path: str | Path) -> float:
     )
     out, _ = await proc.communicate()
     try:
-        rate = (
-            _json.loads(out.decode())
-            .get("streams", [{}])[0]
-            .get("avg_frame_rate", "0/1")
-        )
+        rate = _json.loads(out.decode()).get("streams", [{}])[0].get("avg_frame_rate", "0/1")
         num, _, den = str(rate).partition("/")
         return float(num) / float(den) if float(den) else 0.0
     except Exception:

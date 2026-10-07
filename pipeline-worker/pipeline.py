@@ -486,9 +486,7 @@ async def run_pipeline(job_id: str):
                 seg.end = pos + out_len
                 slots.append([round(pos, 3), round(out_len, 3)])
             (work / "timeline.json").write_text(
-                json.dumps(
-                    {"factor": slow_factor, "out_duration": out_duration, "slots": slots}
-                ),
+                json.dumps({"factor": slow_factor, "out_duration": out_duration, "slots": slots}),
                 encoding="utf-8",
             )
             # Re-write transcripts/SRT now that segments sit on the output timeline.

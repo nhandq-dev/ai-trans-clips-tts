@@ -65,6 +65,7 @@ def _client(api_key: str) -> genai.Client:
         raise PermanentError(GEMINI_NOT_CONFIGURED, "no Gemini API key is configured")
     return genai.Client(api_key=api_key)
 
+
 def _prompt(
     source_language: str = "auto",
     target_language: str = "vi",
@@ -136,7 +137,7 @@ def _prompt(
         "natural pauses into consecutive segments.\n"
         "Content:\n"
         '- "original": verbatim SPOKEN words in the source language. Ignore on-screen text, '
-        "captions, titles and song lyrics. Never invent text; use \"[?]\" if unclear. "
+        'captions, titles and song lyrics. Never invent text; use "[?]" if unclear. '
         "If two segments overlap by more than half, keep only the one actually heard.\n"
         f'- "translation": natural, concise {target_language} suited to being spoken aloud '
         "(dubbing). Be brief: drop filler, avoid padding. Follow the glossary.\n"
@@ -149,10 +150,9 @@ def _prompt(
         + "- Units: keep the original unit and add metric in short form only if the target "
         "audience would not know it.\n"
         "- Briefly clarify proper nouns or culture-specific terms only when meaning would be "
-        "lost, in at most a few extra words.\n"
-        + numbers
-        + 'No speech: {"lang":"unknown","s":[]}'
+        "lost, in at most a few extra words.\n" + numbers + 'No speech: {"lang":"unknown","s":[]}'
     )
+
 
 def _to_sec(ts: str | int | float) -> float:
     """Convert MM:SS.d or HH:MM:SS.d (or a plain seconds number) to seconds."""
