@@ -213,6 +213,37 @@ async def mix_and_mux(
     return out_path
 
 
+async def _video_fps(path: str | Path) -> float:
+    """The video stream's frame rate (ffprobe ``avg_frame_rate``), 0 if unknown."""
+    import json as _json
+
+    proc = await asyncio.create_subprocess_exec(
+        FFPROBE_BIN,
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate",
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await proc.communicate()
+    try:
+        rate = (
+            _json.loads(out.decode())
+            .get("streams", [{}])[0]
+            .get("avg_frame_rate", "0/1")
+        )
+        num, _, den = str(rate).partition("/")
+        return float(num) / float(den) if float(den) else 0.0
+    except Exception:
+        return 0.0
+
+
 async def render_translated_video(
     video_path: str | Path,
     dub_path: str | Path,
@@ -315,8 +346,15 @@ async def render_translated_video(
 
     # Slow the finished render LAST (see the note above): one final setpts over
     # already-burned frames preserves the clip's frame count = true slow motion.
+    # Re-synchronize to the source frame rate afterwards so the container is CFR —
+    # a VFR stream makes some players stall early. `fps` must sit AFTER everything
+    # (nothing later can re-sync and duplicate frames at EOF).
     if slow_factor > 1.0001:
-        parts.append(f"[{vlabel}]setpts=PTS*{slow_factor:.4f}[vslow]")
+        fps = await _video_fps(video_path)
+        if fps > 0.0:
+            parts.append(f"[{vlabel}]setpts=PTS*{slow_factor:.4f},fps={fps:.6g}[vslow]")
+        else:
+            parts.append(f"[{vlabel}]setpts=PTS*{slow_factor:.4f}[vslow]")
         vlabel = "vslow"
 
     if not parts:
