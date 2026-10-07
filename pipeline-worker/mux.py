@@ -245,12 +245,13 @@ async def render_translated_video(
     dims: dict | None = None
 
     # Slow the video first so every later filter (blur, ASS burn, watermark)
-    # operates on the output timeline. `setpts` alone re-times the frames and
-    # `-fps_mode vfr` keeps the original frame count spread over the longer
-    # timeline (true slow motion). Do NOT append `fps=<rate>` here: on this
-    # ffmpeg build that dups frames to keep CFR, but piles every duplicate at the
-    # END of the file — the footage then runs at original speed and the remaining
-    # 1.5x tail is just a frozen last frame while the dub keeps playing.
+    # operates on the output timeline. `setpts` alone re-times the frames so the
+    # stream keeps its original frame count spread over the longer timeline —
+    # exactly the proven recipe `setpts=1.5*PTS` (no fps filter, no fps_mode),
+    # which preserves the frame count and yields real slow motion on this ffmpeg
+    # build. Adding `fps=30` (or forcing CFR) makes this ffmpeg pile every
+    # duplicate frame at the END of the file: footage at original speed for the
+    # source duration, then a frozen last frame while the dub keeps playing.
     if slow_factor > 1.0001:
         parts.append(f"[0:v]setpts=PTS*{slow_factor:.4f}[vslow]")
         vlabel = "vslow"
@@ -338,8 +339,6 @@ async def render_translated_video(
 
     cmd = [FFMPEG_BIN, "-y", "-i", str(video_path), "-i", str(dub_path)]
     cmd += ["-filter_complex", ";".join(parts)]
-    if slow_factor > 1.0001:
-        cmd += ["-fps_mode", "vfr"]
     cmd += ["-map", video_map, "-map", "[aout]"]
     cmd += vcodec + ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(tmp)]
     proc = await asyncio.create_subprocess_exec(
