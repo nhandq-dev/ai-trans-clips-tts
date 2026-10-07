@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 from pathlib import Path
 
 from errors import ALIGN_FAILED, PermanentError, TransientError
@@ -104,66 +103,6 @@ async def _run_ffmpeg(cmd: list[str], where: str) -> None:
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise TransientError(ALIGN_FAILED, (stderr or b"").decode(errors="replace")[-600:])
-
-
-async def speech_map(audio_path: str | Path) -> list[list[float]]:
-    """Non-silent [start, end] intervals of the source audio, via ``silencedetect``.
-
-    Used to ground the dubbing to the *real* speech onsets instead of the LLM's
-    guessed timestamps (which are often a little early or late — and scaling them
-    by the slow factor makes the video seem to run ahead of the narration).
-    """
-    proc = await asyncio.create_subprocess_exec(
-        FFMPEG_BIN,
-        "-v",
-        "info",
-        "-i",
-        str(audio_path),
-        "-af",
-        f"silencedetect=noise={SILENCE_THRESHOLD_DB}dB:d=0.35",
-        "-f",
-        "null",
-        "-",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    text = stderr.decode(errors="replace")
-    starts = [float(m) for m in re.findall(r"silence_start: ([0-9.]+)", text)]
-    ends = [float(m) for m in re.findall(r"silence_end: ([0-9.]+)", text)]
-
-    intervals: list[list[float]] = []
-    prev = 0.0
-    for s, e in zip(starts, ends, strict=False):
-        if s > prev:
-            intervals.append([prev, s])
-        prev = max(prev, e)
-    # The final utterance has no trailing silence to bound it — include it up to
-    # the audio end so the last segment still snaps to a real speech onset.
-    total = await probe_duration(audio_path)
-    if prev < total - 0.05:
-        intervals.append([prev, total])
-    return intervals
-
-
-def snap_starts(raw_starts: list[float], speech: list[list[float]]) -> list[float]:
-    """Snap each guessed onset to the nearest real speech onset.
-
-    If the guess falls inside a speech interval, take that interval's start;
-    otherwise take the start of the next speech interval. Keeps order/length.
-    """
-    out: list[float] = []
-    for st in raw_starts:
-        chosen = st
-        for a, b in speech:
-            if a <= st <= b:
-                chosen = a
-                break
-            if a > st:
-                chosen = a
-                break
-        out.append(chosen)
-    return out
 
 
 def _silence_trim_filter() -> str:
