@@ -536,6 +536,7 @@ async def run_pipeline(job_id: str):
                         width=info["width"],
                         height=info["height"],
                         style=job.options.get("subtitle_style"),
+                        time_scale=(1.0 / slow_factor) if slow_factor > 1.0001 else 1.0,
                     )
 
                 translated = work / "translated.mp4"

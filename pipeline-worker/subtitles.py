@@ -406,8 +406,15 @@ def write_ass(
     width: int,
     height: int,
     style: dict | None = None,
+    time_scale: float = 1.0,
 ) -> Path:
-    """Render new subtitles as ASS, positioned inside ``box``."""
+    """Render new subtitles as ASS, positioned inside ``box``.
+
+    ``time_scale`` maps the segment times to the frame domain the burn runs in.
+    With video slowdown the burn happens BEFORE ``setpts`` (so overlay does not
+    duplicate frames), so pass the reciprocal of the slow factor (1/S) here —
+    the final ``setpts=PTS*S`` then puts the subtitles back on the output clock.
+    """
     style = style or {}
     font = style.get("font", "Arial")
     # Default font scales with the frame height (e.g. 60px on 1080p); an explicit
@@ -448,8 +455,10 @@ def write_ass(
     lines = []
     for seg in result.segments:
         text = seg.target_text.replace("\n", "\\N")
+        s = seg.start * time_scale
+        e = seg.end * time_scale
         lines.append(
-            f"Dialogue: 0,{_ass_time(seg.start)},{_ass_time(seg.end)},Default,,0,0,0,,{text}"
+            f"Dialogue: 0,{_ass_time(s)},{_ass_time(e)},Default,,0,0,0,,{text}"
         )
     out_path = Path(out_path)
     tmp = Path(str(out_path) + ".tmp")

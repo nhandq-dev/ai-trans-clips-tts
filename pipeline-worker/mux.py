@@ -244,17 +244,15 @@ async def render_translated_video(
     vlabel = "0:v"
     dims: dict | None = None
 
-    # Slow the video first so every later filter (blur, ASS burn, watermark)
-    # operates on the output timeline. `setpts` alone re-times the frames so the
-    # stream keeps its original frame count spread over the longer timeline —
-    # exactly the proven recipe `setpts=1.5*PTS` (no fps filter, no fps_mode),
-    # which preserves the frame count and yields real slow motion on this ffmpeg
-    # build. Adding `fps=30` (or forcing CFR) makes this ffmpeg pile every
-    # duplicate frame at the END of the file: footage at original speed for the
-    # source duration, then a frozen last frame while the dub keeps playing.
-    if slow_factor > 1.0001:
-        parts.append(f"[0:v]setpts=PTS*{slow_factor:.4f}[vslow]")
-        vlabel = "vslow"
+    # The whole render (blur, ASS burn, watermark) runs on the ORIGINAL timeline,
+    # then `setpts` re-times the finished frames over the slower clock. The slow
+    # must be applied ONLY at the end: on this ffmpeg build the `overlay` filter
+    # (used for the blur band) re-syncs to a CFR rate and, when fed already-
+    # stretched timestamps, piles duplicate frames at EOF — footage at original
+    # speed followed by a frozen tail while the dub keeps playing. Burning first
+    # keeps regular timestamps inside overlay, and one final setpts preserves the
+    # frame count (verified: 3698 -> 3698 frames over the 1.5x duration). The ASS
+    # burn uses source-domain times via `write_ass(time_scale=1/S)`.
 
     if blur_box:
         dims = await _video_size(video_path)
@@ -314,6 +312,12 @@ async def render_translated_video(
             f"x='mod(t*W/9,W+tw)-tw':y='mod(t*H/12,H+th)-th'[wmv]"
         )
         vlabel = "wmv"
+
+    # Slow the finished render LAST (see the note above): one final setpts over
+    # already-burned frames preserves the clip's frame count = true slow motion.
+    if slow_factor > 1.0001:
+        parts.append(f"[{vlabel}]setpts=PTS*{slow_factor:.4f}[vslow]")
+        vlabel = "vslow"
 
     if not parts:
         # no video filters: copy video
