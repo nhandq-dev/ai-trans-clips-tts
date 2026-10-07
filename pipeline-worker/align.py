@@ -109,6 +109,31 @@ async def _run_ffmpeg(cmd: list[str], where: str) -> None:
         raise TransientError(ALIGN_FAILED, (stderr or b"").decode(errors="replace")[-600:])
 
 
+async def to_wav(src: str | Path, dst: str | Path) -> None:
+    """Decode the TTS clip to a 48k mono wav verbatim — no silence trim, no tempo
+    change. The video is already slowed, so the narration is placed as spoken."""
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(dst) + ".tmp.wav")
+    await _run_ffmpeg(
+        [
+            FFMPEG_BIN,
+            "-y",
+            "-i",
+            str(src),
+            "-ar",
+            WORK_SR,
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(tmp),
+        ],
+        "wav",
+    )
+    tmp.replace(dst)
+
+
 async def speech_map(audio_path: str | Path) -> list[list[float]]:
     """Non-silent [start, end] intervals of the source audio, via ``silencedetect``.
 

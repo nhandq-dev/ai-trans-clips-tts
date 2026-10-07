@@ -397,23 +397,22 @@ async def run_pipeline(job_id: str):
         timeline_path = work / "timeline.json"
         if "aligning" not in job.stage_state:
             await _update(job_id, "aligning")
-            from align import fit_to_slot, probe_duration, slow_factor_for
+            from align import DUB_SLOW_FACTOR, probe_duration, to_wav
 
             aligned_dir.mkdir(parents=True, exist_ok=True)
 
             segs = result.segments
             n = min(len(segs), len(tts_paths))
-            # Phase 1: fit every clip at natural pace and measure its real length.
+            # Convert every clip to wav verbatim — no trim, no tempo change.
             out_lens: list[float] = []
             for i in range(n):
                 dst = aligned_dir / f"seg_{i:04d}.wav"
-                info = await fit_to_slot(tts_paths[i], dst, 1.0, stretch=False)
-                out_lens.append(info["output_duration"])
-            total_natural = sum(out_lens)
+                await to_wav(tts_paths[i], dst)
+                out_lens.append(await probe_duration(dst))
             video_duration = await probe_duration(source_mp4)
-            # Phase 2: choose the slowdown from the MEASURED narration, so the
-            # video is slowed exactly enough for natural TTS to line up with it.
-            S = slow_factor_for(total_natural, video_duration)
+            # Fixed slowdown: the video plays at DUB_SLOW_FACTOR (1.5) and each
+            # clip is placed at S x (Gemini start), retaining its natural length.
+            S = DUB_SLOW_FACTOR
             out_duration = S * video_duration
 
             aligned_clips: list[tuple[Path, float]] = []
