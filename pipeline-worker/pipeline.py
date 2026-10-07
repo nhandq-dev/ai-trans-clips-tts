@@ -413,6 +413,8 @@ async def run_pipeline(job_id: str):
                 narration_speedup,
                 probe_duration,
                 slow_factor_for,
+                snap_starts,
+                speech_map,
             )
 
             aligned_dir.mkdir(parents=True, exist_ok=True)
@@ -426,13 +428,19 @@ async def run_pipeline(job_id: str):
             out_duration = S * video_duration
             speed = narration_speedup(total_natural, out_duration)
 
+            # Ground the narration to the real speech onsets in the source audio,
+            # then scale by the slow factor — otherwise a slightly-early/late LLM
+            # timestamp (scaled by S) makes the video look ahead of the dubbing.
+            speech = await speech_map(audio_flac)
+            onsets = snap_starts([float(seg.start) for seg in segs[:n]], speech)
+
             aligned_clips: list[tuple[Path, float]] = []
             slots: list[list[float]] = []
             cursor = 0.0
             for i in range(n):
                 seg = segs[i]
                 target_len = durations[i] * speed
-                anchor = S * float(seg.start)
+                anchor = S * onsets[i]
                 pos = max(anchor, cursor)
                 dst = aligned_dir / f"seg_{i:04d}.wav"
                 await fit_to_slot(tts_paths[i], dst, target_len)
