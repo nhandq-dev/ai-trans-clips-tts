@@ -213,6 +213,37 @@ async def mix_and_mux(
     return out_path
 
 
+async def _video_fps(path: str | Path) -> float:
+    """The video stream's frame rate (ffprobe ``avg_frame_rate``), 0 if unknown."""
+    import json as _json
+
+    proc = await asyncio.create_subprocess_exec(
+        FFPROBE_BIN,
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate",
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await proc.communicate()
+    try:
+        rate = (
+            _json.loads(out.decode())
+            .get("streams", [{}])[0]
+            .get("avg_frame_rate", "0/1")
+        )
+        num, _, den = str(rate).partition("/")
+        return float(num) / float(den) if float(den) else 0.0
+    except Exception:
+        return 0.0
+
+
 async def render_translated_video(
     video_path: str | Path,
     dub_path: str | Path,
@@ -245,9 +276,16 @@ async def render_translated_video(
     dims: dict | None = None
 
     # Slow the video first so every later filter (blur, ASS burn, watermark)
-    # operates on the output timeline.
+    # operates on the output timeline. `fps` after `setpts` re-times the frames
+    # AND keeps the source frame rate — otherwise the encoder just re-times the
+    # existing frames, making the footage choppy/duplicated instead of a smooth
+    # 1.5× slow-motion.
     if slow_factor > 1.0001:
-        parts.append(f"[0:v]setpts=PTS*{slow_factor:.4f}[vslow]")
+        fps = await _video_fps(video_path)
+        if fps > 0.0:
+            parts.append(f"[0:v]setpts=PTS*{slow_factor:.4f},fps={fps:.6g}[vslow]")
+        else:
+            parts.append(f"[0:v]setpts=PTS*{slow_factor:.4f}[vslow]")
         vlabel = "vslow"
 
     if blur_box:
