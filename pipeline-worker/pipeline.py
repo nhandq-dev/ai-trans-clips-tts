@@ -30,12 +30,6 @@ CACHE_DIR = Path(os.getenv("CACHE_DIR") or (Path(__file__).parent / "cache"))
 MUX_CONCURRENCY = max(1, int(os.getenv("MUX_CONCURRENCY", "2")))
 _MUX_SEM = asyncio.Semaphore(MUX_CONCURRENCY)
 
-# Slow-the-source-first dubbing: the video+audio are slowed by this factor BEFORE
-# transcription, so Gemini's timestamps are already on the output clock and the
-# narration keeps its natural pace.
-DUB_SLOW_MODE = os.getenv("DUB_SLOW_MODE", "fixed").strip().lower()
-DUB_SLOW_FACTOR = float(os.getenv("DUB_SLOW_FACTOR", "1.5"))
-
 # stage progress map (plan/009 §4.2)
 STAGE_PROGRESS = {
     "downloading": 15,
@@ -193,17 +187,6 @@ async def _update(job_id: str, stage: str, progress: int | None = None, **fields
     await jobs.update_job(job_id, stage=stage, progress=progress, **fields)
 
 
-async def _run_ffmpeg(cmd: list[str]) -> None:
-    """Run ffmpeg; raise PermanentError on failure (used by the slow-source step)."""
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise PermanentError("SLOW_FAILED", (stderr or b"").decode(errors="replace")[-600:])
-
-
 def enforce_max_duration(duration_seconds: float, max_seconds: int | None) -> None:
     """Reject a source longer than the plan allows (plan/015).
 
@@ -311,57 +294,10 @@ async def run_pipeline(job_id: str):
                 enforce_max_duration(info["duration"], job.max_duration_seconds)
 
         # ------------------------------------------------------------------
-        # Stage: slowing — slow the source BEFORE transcription so Gemini hears
-        # slower audio (better word timing) and its segment timestamps land
-        # directly on the output clock. Everything downstream (audio for Gemini,
-        # final render, subtitles) uses this slowed file, so no second scale
-        # step is needed and the narration is kept at its natural pace.
-        # ------------------------------------------------------------------
-        slow_factor = 1.0
-        if DUB_SLOW_MODE != "off":
-            slowed = work / "source_slowed.mp4"
-            if "slowing" not in job.stage_state:
-                if not slowed.exists():
-                    from mux import _video_fps
-
-                    s = DUB_SLOW_FACTOR if DUB_SLOW_MODE == "fixed" else 1.5
-                    src_fps = await _video_fps(source_mp4)
-                    if src_fps > 0.0:
-                        vf = f"[0:v]setpts=PTS*{s:.4f},fps={src_fps:.6g}[v]"
-                    else:
-                        vf = f"[0:v]setpts=PTS*{s:.4f}[v]"
-                    cmd = [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        str(source_mp4),
-                        "-filter_complex",
-                        f"{vf};[0:a]atempo={1.0 / s:.4f}[a]",
-                        "-map",
-                        "[v]",
-                        "-map",
-                        "[a]",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "veryfast",
-                        "-crf",
-                        "20",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "192k",
-                        str(slowed),
-                    ]
-                    await _run_ffmpeg(cmd)
-                await jobs.update_job(job_id, stage_state={**job.stage_state, "slowing": "done"})
-            source_mp4 = slowed
-            slow_factor = DUB_SLOW_FACTOR if DUB_SLOW_MODE == "fixed" else 1.5
-
-        # ------------------------------------------------------------------
-        # Stage: extracting
+        # Stage: extracting — audio is taken from the ORIGINAL source (1x).
+        # The video slowdown happens AFTER the narration is synthesized, with a
+        # factor derived from the measured narration (see aligning/mux), so the
+        # video is slowed exactly as much as the natural-speed TTS needs.
         # ------------------------------------------------------------------
         if "extracting" not in job.stage_state:
             await _update(job_id, "extracting")
@@ -451,42 +387,49 @@ async def run_pipeline(job_id: str):
             raise RuntimeError("no TTS clips generated")
 
         # ------------------------------------------------------------------
-        # Stage: aligning (fit to slot) — place the narration on the output clock
+        # Stage: aligning — measure the narration and pick the output slowdown
         # ------------------------------------------------------------------
-        # The source was already slowed by `S` BEFORE transcription, so Gemini's
-        # segment timestamps are already on the output clock. Each clip is placed
-        # at its segment start at NATURAL pace (never stretched); the monotonic
-        # cursor only pushes a clip right when it would overlap the previous one.
+        # The TTS clips are measured at natural pace; the video is slowed by
+        # the smallest factor that lets the whole narration fit (auto S). Each
+        # clip is placed at S x (Gemini start), never tempo-changed; the
+        # monotonic cursor only pushes a clip when it would overlap.
         aligned_dir = work / "aligned"
         timeline_path = work / "timeline.json"
         if "aligning" not in job.stage_state:
             await _update(job_id, "aligning")
-            from align import fit_to_slot, probe_duration
+            from align import fit_to_slot, probe_duration, slow_factor_for
 
             aligned_dir.mkdir(parents=True, exist_ok=True)
 
             segs = result.segments
             n = min(len(segs), len(tts_paths))
+            # Phase 1: fit every clip at natural pace and measure its real length.
+            out_lens: list[float] = []
+            for i in range(n):
+                dst = aligned_dir / f"seg_{i:04d}.wav"
+                info = await fit_to_slot(tts_paths[i], dst, 1.0, stretch=False)
+                out_lens.append(info["output_duration"])
+            total_natural = sum(out_lens)
             video_duration = await probe_duration(source_mp4)
-            out_duration = video_duration
+            # Phase 2: choose the slowdown from the MEASURED narration, so the
+            # video is slowed exactly enough for natural TTS to line up with it.
+            S = slow_factor_for(total_natural, video_duration)
+            out_duration = S * video_duration
 
             aligned_clips: list[tuple[Path, float]] = []
             slots: list[list[float]] = []
             cursor = 0.0
             for i in range(n):
                 seg = segs[i]
-                dst = aligned_dir / f"seg_{i:04d}.wav"
-                # Natural pace: trim dead silence, never change the tempo.
-                info = await fit_to_slot(tts_paths[i], dst, 1.0, stretch=False)
-                out_len = info["output_duration"]
-                pos = max(float(seg.start), cursor)
-                aligned_clips.append((dst, pos))
+                out_len = out_lens[i]
+                pos = max(S * float(seg.start), cursor)
+                aligned_clips.append((aligned_dir / f"seg_{i:04d}.wav", pos))
                 cursor = pos + out_len
                 seg.start = pos
                 seg.end = pos + out_len
                 slots.append([round(pos, 3), round(out_len, 3)])
             (work / "timeline.json").write_text(
-                json.dumps({"factor": slow_factor, "out_duration": out_duration, "slots": slots}),
+                json.dumps({"factor": S, "out_duration": out_duration, "slots": slots}),
                 encoding="utf-8",
             )
             # Re-write transcripts/SRT now that segments sit on the output timeline.
@@ -528,8 +471,16 @@ async def run_pipeline(job_id: str):
 
             async with _MUX_SEM:
                 video_duration = await probe_duration(source_mp4)
-                slow_factor = 1.0  # the source is already slowed; no second setpts
+                slow_factor = 1.0
                 out_duration = video_duration
+                tl = work / "timeline.json"
+                if tl.exists():
+                    try:
+                        timeline = json.loads(tl.read_text(encoding="utf-8"))
+                        slow_factor = float(timeline.get("factor") or 1.0)
+                        out_duration = float(timeline.get("out_duration") or video_duration)
+                    except Exception:
+                        pass
                 dub_wav = work / "dub.wav"
                 if not dub_wav.exists():
                     await build_dub_track(aligned_clips, out_duration, dub_wav)
@@ -571,7 +522,7 @@ async def run_pipeline(job_id: str):
                         width=info["width"],
                         height=info["height"],
                         style=job.options.get("subtitle_style"),
-                        time_scale=1.0,
+                        time_scale=(1.0 / slow_factor) if slow_factor > 1.0001 else 1.0,
                     )
 
                 translated = work / "translated.mp4"

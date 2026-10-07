@@ -42,7 +42,10 @@ SLOW_PAD_BUFFER_SECONDS = float(os.getenv("ALIGN_SLOW_PAD_BUFFER_SECONDS", "0.6"
 # Dub-first timeline: slow the output video so the naturally-paced narration fits.
 # `fixed` always slows by DUB_SLOW_FACTOR; `auto` slows only as much as needed
 # (clamped to [DUB_SLOW_MIN, DUB_SLOW_FACTOR]); `off` keeps the old behavior.
-DUB_SLOW_MODE = os.getenv("DUB_SLOW_MODE", "fixed").strip().lower()
+# `auto` (default) slows the video only as much as the measured narration needs
+# so natural-speed TTS never sounds faster than the picture; `fixed` always uses
+# DUB_SLOW_FACTOR; `off` keeps the source speed (narration squeezed to fit slots).
+DUB_SLOW_MODE = os.getenv("DUB_SLOW_MODE", "auto").strip().lower()
 DUB_SLOW_FACTOR = float(os.getenv("DUB_SLOW_FACTOR", "1.5"))
 DUB_SLOW_MIN = float(os.getenv("DUB_SLOW_MIN", "1.0"))
 # Cap on how much the narration is sped up when even the slowed video is too short.
