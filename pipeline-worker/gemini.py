@@ -159,7 +159,7 @@ def _to_sec(ts: str | int | float) -> float:
     if isinstance(ts, (int, float)):
         return float(ts)
     parts = str(ts).split(":")
-    if len(parts) == 2
+    if len(parts) == 2:
         m, s = parts
         return int(m) * 60 + float(s)
     if len(parts) == 3:
