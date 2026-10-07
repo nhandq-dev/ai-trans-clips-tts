@@ -37,11 +37,17 @@ async def probe_duration(path: str | Path) -> float:
 
 
 async def build_dub_track(
-    aligned_clips: list[tuple[Path, float]],  # (wav_path, start_seconds)
+    aligned_clips: list[tuple[Path, float]],  # (wav_path, slot_start_seconds)
     video_duration: float,
     out_path: str | Path,
 ) -> Path:
-    """Build dub.wav by placing each clip at ``start`` on a silent track."""
+    """Build dub.wav by placing each clip on a silent track.
+
+    Clips are laid out with a monotonic cursor (`start = max(slot_start,
+    previous_clip_end)`) so two clips can never overlap — a clip that somehow
+    overruns its slot pushes the next one, it never mixes over it. With align's
+    exact-length fit, `start` equals `slot_start` and there is no drift.
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(out_path) + ".tmp.wav")
@@ -72,6 +78,16 @@ async def build_dub_track(
 
     # Input 0 is a silent track as long as the video; each clip is a further
     # input delayed to its start time, then everything is mixed with amix.
+    # Probe every clip up front (concurrently) so we can compute an overlap-free
+    # placement without blocking on ffprobe in the middle of filter building.
+    durations = await asyncio.gather(*(probe_duration(wav) for wav, _ in aligned_clips))
+    placements: list[tuple[Path, float]] = []
+    cursor = 0.0
+    for (wav, slot_start), dur in zip(aligned_clips, durations, strict=False):
+        start = max(slot_start, cursor)
+        placements.append((wav, start))
+        cursor = start + (dur or 0.0)
+
     filter_parts = []
     cmd = [
         FFMPEG_BIN,
@@ -81,16 +97,16 @@ async def build_dub_track(
         "-i",
         f"anullsrc=r=48000:cl=mono:d={video_duration:.3f}",
     ]
-    for wav, _ in aligned_clips:
+    for wav, _ in placements:
         cmd.extend(["-i", str(wav)])
     # [1:a]adelay=..[a1]; ...; [0:a][a1][a2]amix=inputs=N:normalize=0
-    for idx, (_, start) in enumerate(aligned_clips, start=1):
+    for idx, (_, start) in enumerate(placements, start=1):
         delay_ms = int(round(start * 1000))
         # adelay needs delay for each channel: 1 channel -> delay|delay
         filter_parts.append(f"[{idx}:a]adelay={delay_ms}|{delay_ms}[a{idx}]")
     # amix all
-    amix_inputs = "".join(f"[a{idx}]" for idx in range(1, len(aligned_clips) + 1))
-    n_inputs = len(aligned_clips) + 1
+    amix_inputs = "".join(f"[a{idx}]" for idx in range(1, len(placements) + 1))
+    n_inputs = len(placements) + 1
     filter_parts.append(
         f"[0:a]{amix_inputs}amix=inputs={n_inputs}"
         ":normalize=0:duration=longest:dropout_transition=0[dub]"
@@ -197,6 +213,37 @@ async def mix_and_mux(
     return out_path
 
 
+async def _video_fps(path: str | Path) -> float:
+    """The video stream's frame rate (ffprobe ``avg_frame_rate``), 0 if unknown."""
+    import json as _json
+
+    proc = await asyncio.create_subprocess_exec(
+        FFPROBE_BIN,
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate",
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await proc.communicate()
+    try:
+        rate = (
+            _json.loads(out.decode())
+            .get("streams", [{}])[0]
+            .get("avg_frame_rate", "0/1")
+        )
+        num, _, den = str(rate).partition("/")
+        return float(num) / float(den) if float(den) else 0.0
+    except Exception:
+        return 0.0
+
+
 async def render_translated_video(
     video_path: str | Path,
     dub_path: str | Path,
@@ -208,12 +255,17 @@ async def render_translated_video(
     original_volume_db: int = -20,
     mute_original: bool = False,
     subtitle_style: dict | None = None,
+    slow_factor: float = 1.0,
 ) -> Path:
     """Single-pass render (plan/009 T3.5): blur old subs + burn new ASS + mix audio.
 
     Only one video encode. When ``ass_path`` is None no burn happens; when
     ``blur_box`` is None no blur happens. ``watermark`` is drawn last, moving
     diagonally across the frame (white, 40% opacity).
+
+    ``slow_factor`` > 1 slows the output video (``setpts=PTS*S``) so the
+    naturally-paced dub fits — subtitles/watermark are burned on the slowed
+    stream, and the original audio (if kept) is stretched with ``atempo``.
     """
     video_path, dub_path, out_path = Path(video_path), Path(dub_path), Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,6 +274,19 @@ async def render_translated_video(
     parts: list[str] = []
     vlabel = "0:v"
     dims: dict | None = None
+
+    # Slow the video first so every later filter (blur, ASS burn, watermark)
+    # operates on the output timeline. `fps` after `setpts` re-times the frames
+    # AND keeps the source frame rate — otherwise the encoder just re-times the
+    # existing frames, making the footage choppy/duplicated instead of a smooth
+    # 1.5× slow-motion.
+    if slow_factor > 1.0001:
+        fps = await _video_fps(video_path)
+        if fps > 0.0:
+            parts.append(f"[0:v]setpts=PTS*{slow_factor:.4f},fps={fps:.6g}[vslow]")
+        else:
+            parts.append(f"[0:v]setpts=PTS*{slow_factor:.4f}[vslow]")
+        vlabel = "vslow"
 
     if blur_box:
         dims = await _video_size(video_path)
@@ -252,9 +317,9 @@ async def render_translated_video(
         radius = max(1, min(10, min(w, h) // 2 - 1))
         chroma = max(1, min(5, radius // 2)) if radius >= 2 else 1
         parts.append(
-            f"[0:v]crop={w}:{h}:{x}:{y},"
+            f"[{vlabel}]crop={w}:{h}:{x}:{y},"
             f"boxblur=luma_radius={radius}:luma_power=2:chroma_radius={chroma}:chroma_power=2[bl];"
-            f"[0:v][bl]overlay={x}:{y}[vblur]"
+            f"[{vlabel}][bl]overlay={x}:{y}[vblur]"
         )
         vlabel = "vblur"
 
@@ -294,8 +359,12 @@ async def render_translated_video(
     if mute_original or not has_original_audio:
         parts.append("[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
     else:
+        orig = f"[0:a]volume={original_volume_db}dB[orig]"
+        if slow_factor > 1.0001:
+            # Stretch the kept original audio with the slowed video (atempo keeps pitch).
+            orig = f"[0:a]atempo={1.0 / slow_factor:.4f},volume={original_volume_db}dB[orig]"
         parts.append(
-            f"[0:a]volume={original_volume_db}dB[orig];"
+            f"{orig};"
             f"[orig][1:a]amix=inputs=2:normalize=0:duration=longest:dropout_transition=0[mixed];"
             f"[mixed]loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
         )

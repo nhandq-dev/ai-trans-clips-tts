@@ -111,11 +111,29 @@ def _prompt(
         "Transcribe the audio and translate it for dubbing.\n"
         'Output JSON only: {"lang":"<ISO code or unknown>",'
         '"s":[[start,end,"original","translation"],...]}\n'
-        "Timing:\n"
+        "Localize for the target audience:\n"
+        "- Resolve ambiguous references explicitly. E.g. when the source is zh-CN, "
+        'the speaker says "my country", translate it as "my country China"; '
+        '"our currency" as the target currency with amounts converted '
+        "(e.g. RMB -> VND/USD).\n"
+        "- Clarify proper nouns, units and culture-specific terms for the target language.\n"
+        "Timing (the timeline MUST be one clean sequential chain):\n"
         '- start/end are strings "MM:SS.d" relative to the start of this clip.\n'
-        "- start = first word begins; end = last word ends. Exclude silence, music, pauses.\n"
-        "- Sorted by start. No overlap (end <= next start). Gaps are allowed.\n"
-        "- One sentence/phrase per segment, 1-7 seconds; split long sentences at natural pauses.\n"
+        "- start = the moment the first word begins; end = the moment the last word "
+        "ends. Exclude leading/trailing silence, music and pauses.\n"
+        "- The segment list is a SINGLE chain: the first segment starts at 00:00.0, "
+        "and for every i the next segment starts exactly where the previous one "
+        "ended (end[i] == start[i+1], tolerance < 0.3s). Never leave gaps, never "
+        "overlap, and never give two segments the same start time.\n"
+        "- Each segment must reflect the speech actually present in its own window: "
+        "do NOT pad a sentence to fill a window, and do NOT stretch short speech "
+        "over a long window.\n"
+        "- Keep sentences in the exact window they are spoken. Never move, reorder "
+        "or infer a sentence across windows to make the transcript read smoother "
+        "— the timeline must match the audio, not the story.\n"
+        "- Sorted by start, strictly increasing.\n"
+        "- One sentence/phrase per segment, 1-7 seconds; split long sentences at "
+        "natural pauses into consecutive segments.\n"
         "Content:\n"
         '- "original": verbatim SPOKEN words in the source language. Ignore on-screen text, '
         "captions, titles and song lyrics. Never invent text; use \"[?]\" if unclear. "
