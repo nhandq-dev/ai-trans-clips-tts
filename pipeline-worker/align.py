@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 from errors import ALIGN_FAILED, PermanentError, TransientError
@@ -105,6 +106,70 @@ async def _run_ffmpeg(cmd: list[str], where: str) -> None:
         raise TransientError(ALIGN_FAILED, (stderr or b"").decode(errors="replace")[-600:])
 
 
+async def speech_map(audio_path: str | Path) -> list[list[float]]:
+    """Non-silent [start, end] intervals of the source audio, via ``silencedetect``.
+
+    Used to refine each segment's onset within a BOUNDED window — see
+    ``refine_onsets``. It must never collapse many segments to one interval head.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        FFMPEG_BIN,
+        "-v",
+        "info",
+        "-i",
+        str(audio_path),
+        "-af",
+        f"silencedetect=noise={SILENCE_THRESHOLD_DB}dB:d=0.35",
+        "-f",
+        "null",
+        "-",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    text = stderr.decode(errors="replace")
+    starts = [float(m) for m in re.findall(r"silence_start: ([0-9.]+)", text)]
+    ends = [float(m) for m in re.findall(r"silence_end: ([0-9.]+)", text)]
+
+    intervals: list[list[float]] = []
+    prev = 0.0
+    for s, e in zip(starts, ends, strict=False):
+        if s > prev:
+            intervals.append([prev, s])
+        prev = max(prev, e)
+    total = await probe_duration(audio_path)
+    if prev < total - 0.05:
+        intervals.append([prev, total])
+    return intervals
+
+
+def refine_onsets(
+    raw_starts: list[float], speech: list[list[float]], window: float = 0.8
+) -> list[float]:
+    """Refine each segment's onset against the real audio, bounded to ``window``.
+
+    Gemini's start is used as-is unless it clearly lands beside real speech: if
+    it falls inside a speech interval and that interval begins within ``window``,
+    snap to its start; if it falls in a silent gap, snap to the next speech onset
+    when that is within ``window``. Never moves a start by more than ``window``,
+    so continuous audio can never collapse segments onto a single time (the
+    failure a global VAD snap caused earlier).
+    """
+    out: list[float] = []
+    for st in raw_starts:
+        refined = st
+        for a, b in speech:
+            if a <= st <= b:
+                if st - a <= window:
+                    refined = a
+                break
+            if a > st and a - st <= window:
+                refined = a
+                break
+        out.append(refined)
+    return out
+
+
 def _silence_trim_filter() -> str:
     # Strip lead and trail silence (both ends). `silenceremove` trims the start;
     # reverse, trim, reverse again handles the end.
@@ -152,8 +217,14 @@ async def fit_to_slot(
     slot_seconds: float,
     min_speed: float | None = None,
     max_speed: float | None = None,
+    stretch: bool = True,
 ) -> dict:
-    """Fit ``src`` mp3 to ``slot_seconds``. Writes 48k mono wav to ``dst``.
+    """Prepare ``src`` mp3 as a 48k mono wav at ``dst``.
+
+    ``stretch=True`` (old behaviour): time-stretch with rubberband/atempo so the
+    clip fits ``slot_seconds`` exactly. ``stretch=False``: keep the narration at
+    its natural speed — lead/trail silence is trimmed, but the tempo is never
+    changed, so the placed clip is exactly as spoken.
 
     Returns ``{tts_duration, trimmed_duration, slot, ratio, speed, fits, output_duration}``
     for logging/inspection.
@@ -185,6 +256,36 @@ async def fit_to_slot(
         work_input = trimmed
     else:
         work_input = src
+
+    # Natural pace: no tempo change at all. The video was already slowed so the
+    # narration fits — the caller only places this clip at its (refined) start.
+    if not stretch:
+        tmp = Path(str(dst) + ".tmp.wav")
+        cmd = [
+            FFMPEG_BIN,
+            "-y",
+            "-i",
+            str(work_input),
+            "-ar",
+            WORK_SR,
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(tmp),
+        ]
+        await _run_ffmpeg(cmd, "natural-pace wav")
+        tmp.replace(dst)
+        out_dur = await probe_duration(dst)
+        return {
+            "tts_duration": round(tts_dur, 3),
+            "trimmed_duration": round(trimmed_dur, 3),
+            "slot": round(slot, 3),
+            "ratio": round(trimmed_dur / slot, 3),
+            "speed": 1.0,
+            "fits": True,
+            "output_duration": round(out_dur, 3),
+        }
 
     ratio = trimmed_dur / slot
 

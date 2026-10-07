@@ -410,37 +410,42 @@ async def run_pipeline(job_id: str):
             await _update(job_id, "aligning")
             from align import (
                 fit_to_slot,
-                narration_speedup,
                 probe_duration,
+                refine_onsets,
                 slow_factor_for,
+                speech_map,
             )
 
             aligned_dir.mkdir(parents=True, exist_ok=True)
 
             segs = result.segments
             n = min(len(segs), len(tts_paths))
-            durations = await asyncio.gather(*(probe_duration(tts_paths[i]) for i in range(n)))
-            total_natural = sum(durations)
             video_duration = await probe_duration(source_mp4)
-            S = slow_factor_for(total_natural, video_duration)
+            S = slow_factor_for(0.0, video_duration)
             out_duration = S * video_duration
-            speed = narration_speedup(total_natural, out_duration)
+
+            # Refine each segment's onset against the real speech (bounded, so it
+            # never collapses segments the way the old global VAD snap did), then
+            # anchor the narration there, scaled to the slowed clock.
+            speech = await speech_map(audio_flac)
+            onsets = refine_onsets([float(seg.start) for seg in segs[:n]], speech)
 
             aligned_clips: list[tuple[Path, float]] = []
             slots: list[list[float]] = []
             cursor = 0.0
             for i in range(n):
                 seg = segs[i]
-                target_len = durations[i] * speed
-                anchor = S * float(seg.start)
-                pos = max(anchor, cursor)
                 dst = aligned_dir / f"seg_{i:04d}.wav"
-                await fit_to_slot(tts_paths[i], dst, target_len)
+                # Natural pace: no tempo change — the video is already slowed so
+                # the narration fits; we only place the clip at its start.
+                info = await fit_to_slot(tts_paths[i], dst, 1.0, stretch=False)
+                out_len = info["output_duration"]
+                pos = max(S * onsets[i], cursor)
                 aligned_clips.append((dst, pos))
-                cursor = pos + target_len
+                cursor = pos + out_len
                 seg.start = pos
-                seg.end = pos + target_len
-                slots.append([round(pos, 3), round(target_len, 3)])
+                seg.end = pos + out_len
+                slots.append([round(pos, 3), round(out_len, 3)])
             (work / "timeline.json").write_text(
                 json.dumps({"factor": S, "out_duration": out_duration, "slots": slots}),
                 encoding="utf-8",
