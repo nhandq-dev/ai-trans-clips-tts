@@ -187,13 +187,13 @@ async def _update(job_id: str, stage: str, progress: int | None = None, **fields
     await jobs.update_job(job_id, stage=stage, progress=progress, **fields)
 
 
-async def _out_timeline(work: Path, video_duration: float) -> tuple[float, float]:
+def _out_timeline(work: Path, video_duration: float) -> tuple[float, float]:
     """The slow factor + output duration persisted by the aligning stage."""
     S = 1.0
     p = work / "timeline.json"
     if p.exists():
         try:
-            S = float(json.loads(p.read_text(encoding="utf-8")).get("factor", 1.0))
+            S = float(json.loads(p.read_text(encoding="utf-8")).get("factor") or 1.0)
         except Exception:
             pass
     return S, S * video_duration
