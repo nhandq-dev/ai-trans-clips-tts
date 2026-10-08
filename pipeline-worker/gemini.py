@@ -298,6 +298,39 @@ async def transcribe_and_translate(
             prompt = _prompt(source_language, target_language, context, glossary)
             lang, segments = await _call_once(_client(api_key), model, audio_bytes, prompt)
 
+            # Diagnostic: record EXACTLY what the model returned (local times +
+            # text, BEFORE any normalization/merge/rebase), so we can tell model
+            # output apart from pipeline logic when comparing against transcript.md.
+            try:
+                raw_segments = [
+                    {
+                        "start": round(s.start, 3),
+                        "end": round(s.end, 3),
+                        "original": s.source_text,
+                        "translation": s.target_text,
+                    }
+                    for s in segments
+                ]
+                raw_path = Path(str(audio_path) + ".raw.json")
+                raw_path.write_text(
+                    json.dumps(
+                        {"model": model, "lang": lang, "segments": raw_segments},
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                logger.info(
+                    "GEMINI_RAW chunk=%s model=%s lang=%s n=%d first=%r",
+                    Path(audio_path).name,
+                    model,
+                    lang,
+                    len(raw_segments),
+                    raw_segments[0] if raw_segments else None,
+                )
+            except Exception as exc:  # diagnostic must never fail a job
+                logger.warning("GEMINI_RAW write/log failed: %s", exc)
+
             # Post-processing: sort, drop empty, merge <0.4s (plan/009 T1.2)
             from segments import normalize_segments
 
