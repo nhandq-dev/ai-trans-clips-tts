@@ -382,12 +382,17 @@ async def run_pipeline(job_id: str):
             from chunking import transcribe_chunked
             from schemas import TranscriptionResult
 
+            # Temp quality lift (product decision): force the paid Gemini key for
+            # every user while GEMINI_FORCE_TIER is set, so nobody falls back to
+            # the lower-quota free pool / older models.
+            tier = os.getenv("GEMINI_FORCE_TIER") or getattr(job, "gemini_tier", None)
+
             result: TranscriptionResult = await transcribe_chunked(
                 audio_flac,
                 job.source_language,
                 job.target_language,
                 work_dir=work / "chunks",
-                tier=getattr(job, "gemini_tier", None),
+                tier=tier,
                 context=job.options.get("context") or "",
                 glossary=job.options.get("glossary") or "",
             )
