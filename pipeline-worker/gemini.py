@@ -65,6 +65,7 @@ def _client(api_key: str) -> genai.Client:
         raise PermanentError(GEMINI_NOT_CONFIGURED, "no Gemini API key is configured")
     return genai.Client(api_key=api_key)
 
+
 def _prompt(
     source_language: str = "auto",
     target_language: str = "vi",
@@ -78,12 +79,17 @@ def _prompt(
     )
     is_vi = target_language.split("-")[0].lower() == "vi"
 
-    # Chỉ giữ lại phần đọc số cho TTS tiếng Việt (rất quan trọng cho lồng tiếng)
+    # Chỉ giữ lại phần đọc số cho TTS tiếng Việt —
+    # rất quan trọng cho lồng tiếng.
     numbers = (
-        "Content Formatting:\n"
-        "- Write every number, percentage, and amount out in full Vietnamese words "
-        '(e.g. "10.000" -> "mười nghìn", "15%" -> "mười lăm phần trăm"). No digits.\n'
-    ) if is_vi else ""
+        (
+            "Content Formatting:\n"
+            "- Write every number, percentage, and amount out in full Vietnamese words "
+            '(e.g. "10.000" -> "mười nghìn", "15%" -> "mười lăm phần trăm"). No digits.\n'
+        )
+        if is_vi
+        else ""
+    )
 
     return (
         f"{src} Target language: {target_language}.\n"
@@ -91,21 +97,23 @@ def _prompt(
         "Transcribe the audio and translate it for dubbing.\n"
         'Output JSON only: {"lang":"<ISO code or unknown>",'
         '"s":[[start,end,"original","translation"],...]}\n\n'
-        
         "Timing Rules (CRITICAL):\n"
         '- "start" and "end" are strings "MM:SS.d" relative to the clip.\n'
-        "- Extract the ACTUAL start and end times of spoken audio. Gaps between segments are allowed if there is silence.\n"
+        "- Extract the ACTUAL start and end of spoken audio. Gaps between "
+        "segments are allowed if there is silence.\n"
         "- Segments MUST be in strict chronological order. Start time must strictly increase.\n"
         "- Never overlap segments (start of next segment >= end of current segment).\n"
         "- Segment length: 1 to 7 seconds. Split long sentences at natural pauses.\n\n"
-        
         "Translation Rules:\n"
-        '- "original": verbatim spoken words. Use "[?]" if unclear. Ignore background noise and music.\n'
-        f'- "translation": natural, highly accurate {target_language} for dubbing. Match the duration of the original speech.\n'
+        '- "original": verbatim spoken words. Use "[?]" if unclear. Ignore background '
+        "noise and music.\n"
+        f'- "translation": natural, highly accurate {target_language} for dubbing. '
+        f"Match the duration of the original speech.\n"
         "- Ensure contextually accurate translation. Follow the glossary strictly.\n"
-        + numbers +
-        '\nIf no speech is detected, output: {"lang":"unknown","s":[]}'
+        + numbers
+        + '\nIf no speech is detected, output: {"lang":"unknown","s":[]}'
     )
+
 
 def _to_sec(ts: str | int | float) -> float:
     """Convert MM:SS.d or HH:MM:SS.d (or a plain seconds number) to seconds."""
