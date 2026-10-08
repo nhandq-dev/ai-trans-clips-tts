@@ -70,7 +70,6 @@ def _prompt(
     target_language: str = "vi",
     context: str = "",
     glossary: str = "",
-    speaker_country: str = "",
 ) -> str:
     src = (
         f"Source language is '{source_language}'."
@@ -79,68 +78,33 @@ def _prompt(
     )
     is_vi = target_language.split("-")[0].lower() == "vi"
 
-    if is_vi:
-        money = (
-            "- Money: keep the original amount and add the approximate value in VND, "
-            'always introduced with "khoảng" and rounded generously '
-            '(e.g. "một trăm đô la, khoảng hai triệu rưỡi đồng"). Use an approximate '
-            "typical exchange rate; if unsure about a currency, keep it as spoken "
-            "without converting.\n"
-        )
-        numbers = (
-            "- Write every number, price and amount out in full Vietnamese words so TTS "
-            'reads it correctly (e.g. "10.000đ" -> "mười nghìn đồng", "25,5 triệu" -> '
-            '"hai mươi lăm triệu rưỡi"). No digits, thousands separators, dots or '
-            "decimal points.\n"
-            '- Percentages: "15%" -> "mười lăm phần trăm". Years: read as a full number. '
-            "Phone numbers and codes: read digit by digit. "
-            'Units: "168 m" -> "một trăm sáu mươi tám mét".\n'
-        )
-    else:
-        money = (
-            "- Money: keep amounts and currency exactly as spoken; do not convert "
-            "to any other currency.\n"
-        )
-        numbers = ""
+    # Chỉ giữ lại phần đọc số cho TTS tiếng Việt (rất quan trọng cho lồng tiếng)
+    numbers = (
+        "Content Formatting:\n"
+        "- Write every number, percentage, and amount out in full Vietnamese words "
+        '(e.g. "10.000" -> "mười nghìn", "15%" -> "mười lăm phần trăm"). No digits.\n'
+    ) if is_vi else ""
 
     return (
         f"{src} Target language: {target_language}.\n"
-        f"Topic/tone: {context or 'general'}. Glossary: {glossary or 'none'}.\n"
-        "Glossary entries are canonical: always use them for the matching person, "
-        "character or term; never translate them differently.\n"
+        f"Topic: {context or 'general'}. Glossary: {glossary or 'none'}.\n"
         "Transcribe the audio and translate it for dubbing.\n"
         'Output JSON only: {"lang":"<ISO code or unknown>",'
-        '"s":[[start,end,"original","translation"],...]}\n'
-        "Localize for the target audience:\n"
-        "- Resolve ambiguous references explicitly. E.g. when the source is zh-CN, "
-        'the speaker says "my country", translate it as "my country China"; '
-        '"our currency" as the target currency with amounts converted '
-        "(e.g. RMB -> VND/USD).\n"
-        "- Clarify proper nouns, units and culture-specific terms for the target language.\n"
-        "Timing (the timeline MUST be one continuous sequential chain):\n"
-        '- start/end are strings "MM:SS.d" relative to the start of this clip.\n'
-        "- The segment list is a SINGLE continuous chain: the first segment starts at 00:00.0, "
-        "and for every i the next segment starts exactly where the previous one "
-        "ended (end[i] == start[i+1]). Never leave gaps and never overlap.\n"
-        "- Do NOT exclude silences, music, or pauses. Absorb any non-speech audio into the nearest segment to maintain the continuous timeline.\n"
-        "- Keep sentences in their chronological order. Sorted by start, strictly increasing.\n"
-        "- One sentence/phrase per segment, approximately 1-7 seconds; split long sentences at "
-        "natural pauses into consecutive segments.\n"
-        "Content:\n"
-        '- "original": verbatim SPOKEN words in the source language. Ignore on-screen text, '
-        'captions, titles and song lyrics. Never invent text; use "[?]" if unclear.\n'
-        f'- "translation": natural, concise {target_language} suited to being spoken aloud '
-        "(dubbing). Be brief: drop filler, avoid padding. Follow the glossary.\n"
-        "Localization:\n"
-        f"- Speaker's country: {speaker_country or 'unknown'}.\n"
-        '- Location-relative phrases ("my country", "our city", "back home"): replace with '
-        "the real name ONLY if the speaker's country is given or unmistakable from the "
-        "audio; otherwise translate neutrally. Never guess. Prefer replacing over adding words.\n"
-        + money
-        + "- Units: keep the original unit and add metric in short form only if the target "
-        "audience would not know it.\n"
-        "- Briefly clarify proper nouns or culture-specific terms only when meaning would be "
-        "lost, in at most a few extra words.\n" + numbers + 'No speech: {"lang":"unknown","s":[]}'
+        '"s":[[start,end,"original","translation"],...]}\n\n'
+        
+        "Timing Rules (CRITICAL):\n"
+        '- "start" and "end" are strings "MM:SS.d" relative to the clip.\n'
+        "- Extract the ACTUAL start and end times of spoken audio. Gaps between segments are allowed if there is silence.\n"
+        "- Segments MUST be in strict chronological order. Start time must strictly increase.\n"
+        "- Never overlap segments (start of next segment >= end of current segment).\n"
+        "- Segment length: 1 to 7 seconds. Split long sentences at natural pauses.\n\n"
+        
+        "Translation Rules:\n"
+        '- "original": verbatim spoken words. Use "[?]" if unclear. Ignore background noise and music.\n'
+        f'- "translation": natural, highly accurate {target_language} for dubbing. Match the duration of the original speech.\n'
+        "- Ensure contextually accurate translation. Follow the glossary strictly.\n"
+        + numbers +
+        '\nIf no speech is detected, output: {"lang":"unknown","s":[]}'
     )
 
 def _to_sec(ts: str | int | float) -> float:
