@@ -65,7 +65,6 @@ def _client(api_key: str) -> genai.Client:
         raise PermanentError(GEMINI_NOT_CONFIGURED, "no Gemini API key is configured")
     return genai.Client(api_key=api_key)
 
-
 def _prompt(
     source_language: str = "auto",
     target_language: str = "vi",
@@ -118,27 +117,18 @@ def _prompt(
         '"our currency" as the target currency with amounts converted '
         "(e.g. RMB -> VND/USD).\n"
         "- Clarify proper nouns, units and culture-specific terms for the target language.\n"
-        "Timing (the timeline MUST be one clean sequential chain):\n"
+        "Timing (the timeline MUST be one continuous sequential chain):\n"
         '- start/end are strings "MM:SS.d" relative to the start of this clip.\n'
-        "- start = the moment the first word begins; end = the moment the last word "
-        "ends. Exclude leading/trailing silence, music and pauses.\n"
-        "- The segment list is a SINGLE chain: the first segment starts at 00:00.0, "
+        "- The segment list is a SINGLE continuous chain: the first segment starts at 00:00.0, "
         "and for every i the next segment starts exactly where the previous one "
-        "ended (end[i] == start[i+1], tolerance < 0.3s). Never leave gaps, never "
-        "overlap, and never give two segments the same start time.\n"
-        "- Each segment must reflect the speech actually present in its own window: "
-        "do NOT pad a sentence to fill a window, and do NOT stretch short speech "
-        "over a long window.\n"
-        "- Keep sentences in the exact window they are spoken. Never move, reorder "
-        "or infer a sentence across windows to make the transcript read smoother "
-        "— the timeline must match the audio, not the story.\n"
-        "- Sorted by start, strictly increasing.\n"
-        "- One sentence/phrase per segment, 1-7 seconds; split long sentences at "
+        "ended (end[i] == start[i+1]). Never leave gaps and never overlap.\n"
+        "- Do NOT exclude silences, music, or pauses. Absorb any non-speech audio into the nearest segment to maintain the continuous timeline.\n"
+        "- Keep sentences in their chronological order. Sorted by start, strictly increasing.\n"
+        "- One sentence/phrase per segment, approximately 1-7 seconds; split long sentences at "
         "natural pauses into consecutive segments.\n"
         "Content:\n"
         '- "original": verbatim SPOKEN words in the source language. Ignore on-screen text, '
-        'captions, titles and song lyrics. Never invent text; use "[?]" if unclear. '
-        "If two segments overlap by more than half, keep only the one actually heard.\n"
+        'captions, titles and song lyrics. Never invent text; use "[?]" if unclear.\n'
         f'- "translation": natural, concise {target_language} suited to being spoken aloud '
         "(dubbing). Be brief: drop filler, avoid padding. Follow the glossary.\n"
         "Localization:\n"
@@ -152,7 +142,6 @@ def _prompt(
         "- Briefly clarify proper nouns or culture-specific terms only when meaning would be "
         "lost, in at most a few extra words.\n" + numbers + 'No speech: {"lang":"unknown","s":[]}'
     )
-
 
 def _to_sec(ts: str | int | float) -> float:
     """Convert MM:SS.d or HH:MM:SS.d (or a plain seconds number) to seconds."""
