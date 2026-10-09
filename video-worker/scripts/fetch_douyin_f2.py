@@ -21,6 +21,10 @@ from pathlib import Path
 COOKIE_DIR = Path(os.getenv("COOKIE_DIR") or (Path(__file__).parent.parent / "cookies"))
 DEFAULT_COOKIE_FILE = str(COOKIE_DIR / "douyin_logged_in.txt")
 
+# Route requests through a residential/China proxy when set (Douyin geo-blocks
+# non-China datacenter IPs). Inherited from the worker via DOUYIN_PROXY.
+PROXY = os.getenv("DOUYIN_PROXY", "")
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -106,7 +110,7 @@ async def _fetch_and_download(aweme_id: str, output_path: Path, cookie_file: str
     kwargs = {
         "cookie": cookie,
         "headers": {"User-Agent": _UA},
-        "proxies": {"http://": None, "https://": None},
+        "proxies": {"http://": PROXY or None, "https://": PROXY or None},
         "timeout": 10,
     }
 
@@ -121,11 +125,17 @@ async def _fetch_and_download(aweme_id: str, output_path: Path, cookie_file: str
         return False
 
     headers = {"User-Agent": _UA, "Referer": "https://www.douyin.com/"}
+    proxy = PROXY or None
     for play_url in play_urls:
         log(f"try play url: {play_url[:120]}")
         try:
             with httpx.stream(
-                "GET", play_url, headers=headers, follow_redirects=True, timeout=180
+                "GET",
+                play_url,
+                headers=headers,
+                follow_redirects=True,
+                timeout=180,
+                proxy=proxy,
             ) as r:
                 r.raise_for_status()
                 with open(output_path, "wb") as fh:

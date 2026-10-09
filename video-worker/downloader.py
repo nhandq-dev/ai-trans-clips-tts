@@ -53,6 +53,12 @@ MAX_BYTES = int(os.getenv("MAX_FILESIZE_MB", "500")) * 1024 * 1024
 MAX_FILESIZE_ARG = f"{os.getenv('MAX_FILESIZE_MB', '500')}M"
 YTDLP_TIMEOUT = int(os.getenv("YTDLP_TIMEOUT_SECONDS", "600"))
 
+# Douyin is geo/anti-bot strict: it blocks non-China datacenter IPs even with
+# fresh anonymous cookies. Route ALL douyin traffic (all three download tiers)
+# through `DOUYIN_PROXY` (residential / China proxy) when set; other platforms
+# keep using `YT_DLP_PROXY`.
+DOUYIN_PROXY = os.getenv("DOUYIN_PROXY", "")
+
 YTDLP_BASE = [sys.executable, "-m", "yt_dlp"]
 
 # Format preference, most compatible first.
@@ -221,7 +227,11 @@ async def _download_direct(url: str, job_id: str) -> Path | None:
 
 
 async def _download_douyin(url: str, job_id: str, stderr_log: list[str]) -> Path | None:
-    """Douyin chain: douyin-downloader → f2 → yt-dlp. No browser is ever launched."""
+    """Douyin chain: douyin-downloader → f2 → yt-dlp. No browser is ever launched.
+
+    ``DOUYIN_PROXY`` (residential / China) applies to every tier, because Douyin
+    403s non-China datacenter IPs even with fresh cookies.
+    """
     template = str(output_dir() / f"{job_id}_%(title)s.%(ext)s")
     cookies = cookie_file_for("douyin")
     logged_in = douyin_logged_in_file()
@@ -229,14 +239,18 @@ async def _download_douyin(url: str, job_id: str, stderr_log: list[str]) -> Path
 
     # 1) douyin-downloader (jiji262) — logged-in jar first, then anonymous.
     for jar in (logged_in, cookies):
-        if jar and await douyin.try_douyin_downloader(url, dl_out, jar):
-            logger.info("douyin tier=douyin-downloader jar=%s", Path(jar).name)
+        if jar and await douyin.try_douyin_downloader(url, dl_out, jar, proxy=DOUYIN_PROXY):
+            logger.info(
+                "douyin tier=douyin-downloader jar=%s proxy=%s",
+                Path(jar).name,
+                bool(DOUYIN_PROXY),
+            )
             return dl_out
 
     # 2) f2 (a_bogus signing) — logged-in jar first, then anonymous.
     for jar in (logged_in, cookies):
-        if jar and await douyin.try_f2(url, dl_out, jar):
-            logger.info("douyin tier=f2 jar=%s", Path(jar).name)
+        if jar and await douyin.try_f2(url, dl_out, jar, proxy=DOUYIN_PROXY):
+            logger.info("douyin tier=f2 jar=%s proxy=%s", Path(jar).name, bool(DOUYIN_PROXY))
             return dl_out
 
     # 3) yt-dlp. Bootstrap the jar when none exists, then retry once after a refresh.
@@ -266,7 +280,7 @@ async def _ytdlp_all_formats(
     stderr_log: list[str],
 ) -> Path | None:
     for fmt in FORMATS:
-        rc, err = await _run_ytdlp(_ytdlp_args(url, fmt, template, jar, ""))
+        rc, err = await _run_ytdlp(_ytdlp_args(url, fmt, template, jar, DOUYIN_PROXY))
         if (path := _adopt(job_id)) is not None:
             logger.info("douyin tier=%s fmt=%s", label, fmt)
             return path

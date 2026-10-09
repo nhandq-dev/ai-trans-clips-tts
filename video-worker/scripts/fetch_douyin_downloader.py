@@ -25,6 +25,10 @@ from pathlib import Path
 COOKIE_DIR = Path(os.getenv("COOKIE_DIR") or (Path(__file__).parent.parent / "cookies"))
 DEFAULT_COOKIE_FILE = str(COOKIE_DIR / "douyin_logged_in.txt")
 
+# Route requests through a residential/China proxy when set (Douyin geo-blocks
+# non-China datacenter IPs). Inherited from the worker via DOUYIN_PROXY.
+PROXY = os.getenv("DOUYIN_PROXY", "")
+
 # Only the cookies the tool's config knows about; msToken is minted per request.
 COOKIE_KEYS = ("msToken", "ttwid", "odin_tt", "passport_csrf_token", "sid_guard")
 
@@ -61,7 +65,7 @@ cover: false
 avatar: false
 json: false
 folderstyle: false
-proxy: ""
+proxy: "{PROXY}"
 database: false
 video_quality: highest
 progress:

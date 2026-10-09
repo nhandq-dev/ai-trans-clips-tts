@@ -161,17 +161,23 @@ def fetch_metadata_public(url: str) -> dict | None:
 # --------------------------------------------------------------------------
 
 
-async def _run_script(script: Path, args: list[str], output_path: Path, timeout: int) -> bool:
+async def _run_script(
+    script: Path, args: list[str], output_path: Path, timeout: int, proxy: str = ""
+) -> bool:
     """Run one of the Douyin helper scripts; success = a non-trivial output file."""
     if not script.is_file():
         return False
     try:
+        env = dict(__import__("os").environ)
+        if proxy:
+            env["DOUYIN_PROXY"] = proxy
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             str(script),
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         try:
             await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -188,7 +194,7 @@ async def _run_script(script: Path, args: list[str], output_path: Path, timeout:
 
 
 async def try_douyin_downloader(
-    url: str, output_path: Path, cookie_file: str, timeout: int = 180
+    url: str, output_path: Path, cookie_file: str, timeout: int = 180, proxy: str = ""
 ) -> bool:
     """jiji262 `douyin-downloader` — first tier for Douyin."""
     return await _run_script(
@@ -196,10 +202,13 @@ async def try_douyin_downloader(
         [url, str(output_path), cookie_file],
         output_path,
         timeout,
+        proxy=proxy,
     )
 
 
-async def try_f2(url: str, output_path: Path, cookie_file: str, timeout: int = 600) -> bool:
+async def try_f2(
+    url: str, output_path: Path, cookie_file: str, timeout: int = 600, proxy: str = ""
+) -> bool:
     """f2 library (a_bogus signing). Requires a logged-in jar — Douyin 403s otherwise."""
     if not cookie_file:
         return False
@@ -208,4 +217,5 @@ async def try_f2(url: str, output_path: Path, cookie_file: str, timeout: int = 6
         [url, str(output_path), cookie_file],
         output_path,
         timeout,
+        proxy=proxy,
     )
