@@ -69,9 +69,11 @@ class Settings(BaseSettings):
     vieneu_backend: str = "onnx"
     vieneu_default_voice: str = "Adam"
     vieneu_chunk_chars: int = 280
-    # Independent VieNeu instances held in-process so inferences overlap. RAM
-    # scales ~linearly (each int8 engine ~1-2GB); keep modest on shared VPSes.
-    vieneu_pool_size: int = 2
+    # Independent VieNeu instances held per worker process. `tts_workers` already
+    # gives N processes x 1 model, so a pool >1 multiplies model count (~1-2GB
+    # each) without new process-level parallelism — keep 1 unless a single
+    # process is the only lane.
+    vieneu_pool_size: int = 1
 
     # Kokoro-82M (all languages except Vietnamese) — on-device ONNX TTS replacing
     # edge-tts: no network at synthesis time, no Microsoft 403 blocking.
