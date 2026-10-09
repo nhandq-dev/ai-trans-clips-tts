@@ -9,7 +9,8 @@ class Segment(BaseModel):
     start: float = Field(..., ge=0, description="seconds")
     end: float = Field(..., ge=0, description="seconds")
     source_text: str = Field(..., min_length=1)
-    target_text: str = Field(..., min_length=1)
+    # Empty until translation fills it (Whisper ASR produces source only).
+    target_text: str = Field(default="", description="translation, filled later")
 
 
 class TranscriptionResult(BaseModel):

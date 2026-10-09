@@ -83,6 +83,18 @@ async def lifespan(_app: FastAPI):
         "scheduler started",
         extra={"concurrency": scheduler.snapshot()["concurrency"]},
     )
+    # Warm the Whisper model (download + load on first start; cached afterwards)
+    # so the first user job never pays the model-download latency inline.
+    if os.getenv("TRANSCRIBE_ENGINE", "whisper").strip().lower() == "whisper":
+        try:
+            import asyncio as _asyncio
+
+            from asr import _await_model
+
+            await _asyncio.wait_for(_await_model(), timeout=600)
+            logger.info("whisper model warmed")
+        except Exception as exc:
+            logger.warning("whisper warm-up failed (will lazy-load): %s", exc)
     try:
         yield
     finally:

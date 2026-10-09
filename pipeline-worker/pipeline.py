@@ -30,10 +30,10 @@ CACHE_DIR = Path(os.getenv("CACHE_DIR") or (Path(__file__).parent / "cache"))
 MUX_CONCURRENCY = max(1, int(os.getenv("MUX_CONCURRENCY", "2")))
 _MUX_SEM = asyncio.Semaphore(MUX_CONCURRENCY)
 
-# Slow-the-source-first dubbing: the video+audio are slowed by DUB_SLOW_FACTOR
-# BEFORE transcription, so Gemini's timestamps are already on the output clock
-# and the narration keeps its natural pace.
-DUB_SLOW_MODE = os.getenv("DUB_SLOW_MODE", "auto").strip().lower()
+# Dubbing slowdown: the output video runs DUB_SLOW_FACTOR slower than the
+# source. Whisper transcribes the NATURAL audio; its timestamps are scaled by
+# this factor once, in aligning, and the final render slows the video by it.
+DUB_SLOW_MODE = os.getenv("DUB_SLOW_MODE", "fixed").strip().lower()
 DUB_SLOW_FACTOR = float(os.getenv("DUB_SLOW_FACTOR", "1.5"))
 
 # stage progress map (plan/009 §4.2)
@@ -193,16 +193,6 @@ async def _update(job_id: str, stage: str, progress: int | None = None, **fields
     await jobs.update_job(job_id, stage=stage, progress=progress, **fields)
 
 
-async def _run_ffmpeg(cmd: list[str]) -> None:
-    """Run ffmpeg; raise PermanentError on failure (used by the slow-source step)."""
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise PermanentError("SLOW_FAILED", (stderr or b"").decode(errors="replace")[-600:])
-
-
 def enforce_max_duration(duration_seconds: float, max_seconds: int | None) -> None:
     """Reject a source longer than the plan allows (plan/015).
 
@@ -310,58 +300,10 @@ async def run_pipeline(job_id: str):
                 enforce_max_duration(info["duration"], job.max_duration_seconds)
 
         # ------------------------------------------------------------------
-        # Stage: extracting — audio is taken from the ORIGINAL source (1x).
-        # The video slowdown happens AFTER the narration is synthesized, with a
-        # factor derived from the measured narration (see aligning/mux), so the
-        # video is slowed exactly as much as the natural-speed TTS needs.
-        # ------------------------------------------------------------------
-        # Stage: slowing — slow the source video+audio by DUB_SLOW_FACTOR (1.5)
-        # BEFORE transcription, so Gemini hears slower audio and its segment
-        # timestamps land directly on the output clock. Everything downstream
-        # (audio, final render, subtitles) uses this slowed file.
-        # ------------------------------------------------------------------
-        if DUB_SLOW_MODE != "off":
-            slowed = work / "source_slowed.mp4"
-            if "slowing" not in job.stage_state:
-                if not slowed.exists():
-                    from mux import _video_fps
-
-                    s = DUB_SLOW_FACTOR
-                    src_fps = await _video_fps(source_mp4)
-                    vf = (
-                        f"[0:v]setpts=PTS*{s:.4f},fps={src_fps:.6g}[v]"
-                        if src_fps > 0.0
-                        else f"[0:v]setpts=PTS*{s:.4f}[v]"
-                    )
-                    cmd = [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        str(source_mp4),
-                        "-filter_complex",
-                        f"{vf};[0:a]atempo={1.0 / s:.4f}[a]",
-                        "-map",
-                        "[v]",
-                        "-map",
-                        "[a]",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "veryfast",
-                        "-crf",
-                        "20",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "192k",
-                        str(slowed),
-                    ]
-                    await _run_ffmpeg(cmd)
-                await jobs.update_job(job_id, stage_state={**job.stage_state, "slowing": "done"})
-            source_mp4 = slowed
-
+        # Stage: extracting — audio from the ORIGINAL source (natural speed).
+        # The video slowdown happens ONCE, inside the final mux render
+        # (render_translated_video slow_factor), so Whisper hears natural audio
+        # and its timestamps are scaled by DUB_SLOW_FACTOR in the aligning stage.
         # ------------------------------------------------------------------
         if "extracting" not in job.stage_state:
             await _update(job_id, "extracting")
@@ -375,28 +317,59 @@ async def run_pipeline(job_id: str):
             audio_flac = work / "audio.flac"
 
         # ------------------------------------------------------------------
-        # Stage: transcribing (chunked)
+        # Stage: transcribing (Whisper ASR + Gemini text translation, batched)
         # ------------------------------------------------------------------
+        # New architecture (TRANSCRIBE_ENGINE=whisper): faster-whisper owns the
+        # timeline (accurate, in-order timestamps on the NATURAL clock) and
+        # Gemini only translates text→text with a rolling context window, so a
+        # long montage can neither be re-ordered nor lose its tail. Set
+        # TRANSCRIBE_ENGINE=gemini to restore the legacy chunked Gemini path.
         if "transcribing" not in job.stage_state:
             await _update(job_id, "transcribing")
-            from chunking import transcribe_chunked
             from schemas import TranscriptionResult
 
-            # Temp quality lift (product decision): force the paid Gemini key for
-            # every user while GEMINI_FORCE_TIER is set, so nobody falls back to
-            # the lower-quota free pool / older models.
             tier = os.getenv("GEMINI_FORCE_TIER") or getattr(job, "gemini_tier", None)
+            engine = os.getenv("TRANSCRIBE_ENGINE", "whisper").strip().lower()
+            job_context = job.options.get("context") or ""
+            job_glossary = job.options.get("glossary") or ""
 
-            result: TranscriptionResult = await transcribe_chunked(
-                audio_flac,
-                job.source_language,
-                job.target_language,
-                work_dir=work / "chunks",
-                tier=tier,
-                context=job.options.get("context") or "",
-                glossary=job.options.get("glossary") or "",
-            )
-            # write outputs
+            if engine == "whisper":
+                from asr import transcribe_whisper
+                from gemini import translate_text
+
+                result: TranscriptionResult = await transcribe_whisper(
+                    audio_flac, job.source_language
+                )
+                # Translate in batches with a rolling context window so
+                # terminology stays consistent across the whole video.
+                window = int(os.getenv("CONTEXT_WINDOW_CLIPS", "10"))
+                batch_size = int(os.getenv("TRANSLATE_BATCH", "15"))
+                prev_lines: list[str] = []
+                for i in range(0, len(result.segments), batch_size):
+                    batch = result.segments[i : i + batch_size]
+                    prev_context = "\n".join(prev_lines[-window:])
+                    await translate_text(
+                        batch,
+                        result.detected_language,
+                        job.target_language,
+                        context=job_context,
+                        glossary=job_glossary,
+                        prev_context=prev_context,
+                        tier=tier,
+                    )
+                    prev_lines.extend(f"{s.source_text} -> {s.target_text}".strip() for s in batch)
+            else:
+                from chunking import transcribe_chunked
+
+                result = await transcribe_chunked(
+                    audio_flac,
+                    job.source_language,
+                    job.target_language,
+                    work_dir=work / "chunks",
+                    tier=tier,
+                    context=job_context,
+                    glossary=job_glossary,
+                )
             write_outputs(result, work)
             await jobs.update_job(job_id, stage_state={**job.stage_state, "transcribing": "done"})
             job = await jobs.get_job(job_id)  # type: ignore
@@ -424,22 +397,42 @@ async def run_pipeline(job_id: str):
             return
 
         # ------------------------------------------------------------------
-        # Stage: synthesizing (TTS per segment)
+        # Stage: synthesizing (TTS per segment). The subtitle blur-region detect
+        # (EasyOCR on the ORIGINAL video) is kicked off in the same stage — it
+        # reads the video while TTS is busy on the network, so two independent
+        # heavy jobs overlap instead of serialising.
         # ------------------------------------------------------------------
         if "synthesizing" not in job.stage_state:
             await _update(job_id, "synthesizing")
             from tts import synthesize_all
 
             tts_dir = work / "tts"
+            # Start detection now (best-effort; a failure just skips the blur).
+            detect_task = None
+            if job.options.get("remove_original_subtitles", True):
+                from subtitles import detect_subtitle_box
+
+                detect_task = asyncio.create_task(
+                    detect_subtitle_box(
+                        source_mp4, job.options.get("subtitle_position", "bottom"), work_dir=work
+                    )
+                )
             # synthesize
             try:
                 tts_paths = await synthesize_all(
                     result.segments, job.target_language, job.voice, tts_dir
                 )
             except Exception:
-                # partial handling: if some segments failed, we still continue with what we have
-                # For now, raise
                 raise
+            if detect_task is not None:
+                try:
+                    box = await detect_task
+                    if box.get("confidence", 0) >= 0.3:
+                        import json as _json
+
+                        (work / "subtitle_box.json").write_text(_json.dumps(box), encoding="utf-8")
+                except Exception as exc:
+                    logger.warning("parallel subtitle detect failed: %s", exc)
             await jobs.update_job(
                 job_id,
                 stage_state={
@@ -479,10 +472,11 @@ async def run_pipeline(job_id: str):
                 await to_wav(tts_paths[i], dst)
                 out_lens.append(await probe_duration(dst))
             video_duration = await probe_duration(source_mp4)
-            # source_mp4 is already the slowed file, so its duration IS the output
-            # duration, and Gemini's timestamps are already on the output clock.
+            # Whisper timestamps are on the NATURAL clock; the output video is
+            # slowed by DUB_SLOW_FACTOR inside the final render, so stretch the
+            # narration timeline by S to land on the output clock.
             S = DUB_SLOW_FACTOR
-            out_duration = video_duration
+            out_duration = video_duration * S
 
             aligned_clips: list[tuple[Path, float]] = []
             slots: list[list[float]] = []
@@ -490,7 +484,7 @@ async def run_pipeline(job_id: str):
             for i in range(n):
                 seg = segs[i]
                 out_len = out_lens[i]
-                pos = max(float(seg.start), cursor)
+                pos = max(float(seg.start) * S, cursor)
                 aligned_clips.append((aligned_dir / f"seg_{i:04d}.wav", pos))
                 cursor = pos + out_len
                 seg.start = pos
@@ -506,6 +500,7 @@ async def run_pipeline(job_id: str):
             await jobs.update_job(job_id, stage_state={**job.stage_state, "aligning": "done"})
             job = await jobs.get_job(job_id)  # type: ignore
         else:
+            S = DUB_SLOW_FACTOR
             aligned_clips = []
             slots: list[list[float]] = []
             if timeline_path.exists():
@@ -523,7 +518,7 @@ async def run_pipeline(job_id: str):
                 if idx < len(slots):
                     pos, length = slots[idx]
                 else:
-                    pos, length = float(seg.start), seg.end - seg.start
+                    pos, length = float(seg.start) * S, seg.end - seg.start
                 aligned_clips.append((p, float(pos)))
                 seg.start = float(pos)
                 seg.end = float(pos) + float(length)
@@ -539,31 +534,44 @@ async def run_pipeline(job_id: str):
 
             async with _MUX_SEM:
                 video_duration = await probe_duration(source_mp4)
-                slow_factor = 1.0  # the source is already slowed; render must not slow it again
-                out_duration = video_duration
+                # The source is natural speed; the single render slows it by S.
+                slow_factor = DUB_SLOW_FACTOR
+                out_duration = video_duration * slow_factor
                 dub_wav = work / "dub.wav"
                 if not dub_wav.exists():
                     await build_dub_track(aligned_clips, out_duration, dub_wav)
 
-                # ---- subtitles (T3.2 detect → T3.4 ass → T3.5 single-pass render) ----
+                # ---- subtitles (reuse box from the parallel detect if present) ----
                 blur_box = None
                 ass_path = None
                 position = job.options.get("subtitle_position", "bottom")
                 if job.options.get("remove_original_subtitles", True):
-                    await _update(job_id, "detecting_subs", 60)
-                    from subtitles import detect_subtitle_box
+                    box_path = work / "subtitle_box.json"
+                    box = None
+                    if box_path.exists():
+                        try:
+                            import json as _box_json
 
-                    box = await detect_subtitle_box(source_mp4, position, work_dir=work)
-                    if box.get("confidence", 0) < 0.3:
-                        # Couldn't find a stable subtitle box: blurring a guessed band
-                        # looks worse than not blurring at all. Just burn the new
-                        # subtitles over their default position.
-                        box = None
+                            box = _box_json.loads(box_path.read_text(encoding="utf-8"))
+                            if box.get("confidence", 0) < 0.3:
+                                box = None
+                        except Exception:
+                            box = None
+                    if box is None:
+                        await _update(job_id, "detecting_subs", 60)
+                        from subtitles import detect_subtitle_box
+
+                        box = await detect_subtitle_box(source_mp4, position, work_dir=work)
+                        if box.get("confidence", 0) < 0.3:
+                            # Couldn't find a stable subtitle box: blurring a guessed band
+                            # looks worse than not blurring at all. Just burn the new
+                            # subtitles over their default position.
+                            box = None
+                        elif box_path.parent.exists():
+                            import json as _json
+
+                            box_path.write_text(_json.dumps(box), encoding="utf-8")
                     blur_box = box
-                    if box:
-                        import json as _json
-
-                        (work / "subtitle_box.json").write_text(_json.dumps(box), encoding="utf-8")
                 if job.options.get("burn_subtitles", True):
                     from media import probe as media_probe
                     from subtitles import write_ass

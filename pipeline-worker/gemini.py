@@ -129,6 +129,62 @@ def _to_sec(ts: str | int | float) -> float:
     raise ValueError(f"invalid time format: {ts}")
 
 
+def _prompt_translate(
+    source_language: str = "auto",
+    target_language: str = "vi",
+    context: str = "",
+    glossary: str = "",
+    prev_context: str = "",
+) -> str:
+    """Text-only translation prompt (no audio, no timing).
+
+    Used by ``translate_text`` — the Whisper ASR already owns the timeline, so
+    the LLM only translates. ``prev_context`` is a rolling window of recent
+    source→target lines so terminology stays consistent across a long video.
+    """
+    src = (
+        f"Source language is '{source_language}'."
+        if source_language and source_language != "auto"
+        else "Source language will be detectable from the text."
+    )
+    is_vi = target_language.split("-")[0].lower() == "vi"
+
+    numbers = (
+        (
+            "Content Formatting:\n"
+            "- Write every number, percentage, and amount out in full Vietnamese words "
+            '(e.g. "10.000" -> "mười nghìn", "15%" -> "mười lăm phần trăm"). No digits.\n'
+        )
+        if is_vi
+        else ""
+    )
+
+    ctx_block = (
+        "Context so far (previous lines, source -> translation, for consistency):\n"
+        f"{prev_context}\n\n"
+        if prev_context.strip()
+        else ""
+    )
+
+    return (
+        f"{src} Target language: {target_language}.\n"
+        f"Topic: {context or 'general'}. Glossary: {glossary or 'none'}.\n"
+        f"{ctx_block}"
+        "Below are transcribe-only segments from ONE continuous video. "
+        "Translate each one for DUBBING.\n"
+        'Output JSON only: {"t":["<translation 1>","<translation 2>",...]}\n'
+        "- Strictly one translation per input line, in the SAME order.\n"
+        "- Never merge or drop lines; keep the count identical to the input.\n\n"
+        "Translation Rules:\n"
+        f"- 'translation': natural, highly accurate {target_language}.\n"
+        "- Match the tone and duration of the original speech.\n"
+        "- Ensure contextually accurate translation. Follow the glossary strictly.\n"
+        + numbers
+        + "- If a line is unclear, translate it literally as best you can.\n"
+        "No prose outside the JSON."
+    )
+
+
 #: Exhausted quota is not worth retrying: a per-day/per-project limit will not
 #: recover within the job's lifetime, and retrying burns the remaining budget of
 #: the fallback models too.
@@ -402,3 +458,140 @@ def transcribe_and_translate_sync(*args, **kwargs) -> TranscriptionResult:
     import asyncio
 
     return asyncio.run(transcribe_and_translate(*args, **kwargs))
+
+
+async def _call_text_once(
+    client: genai.Client,
+    model: str,
+    prompt: str,
+) -> str:
+    """Single text-only completion with retry for transient blips on that model."""
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        temperature=0.2,
+    )
+    import asyncio
+
+    def _do() -> str:
+        from tenacity import Retrying
+
+        for attempt in Retrying(
+            wait=wait_exponential_jitter(initial=1, max=10, jitter=3),
+            stop=(stop_after_attempt(3) | stop_after_delay(30)),
+            retry=retry_if_exception_type(TransientError),
+            reraise=True,
+        ):
+            with attempt:
+                try:
+                    resp = client.models.generate_content(
+                        model=model,
+                        contents=[prompt],
+                        config=config,
+                    )
+                except Exception as exc:
+                    err_cls = _classify_genai_error(exc)
+                    raise err_cls(GEMINI_FAILED, str(exc)) from exc
+                text = resp.text  # type: ignore[union-attr]
+                if not text or not text.strip():
+                    raise TransientError(GEMINI_FAILED, f"empty response from {model}")
+                return text
+        raise TransientError(GEMINI_FAILED, f"exhausted retries for {model}")
+
+    return await asyncio.to_thread(_do)
+
+
+async def translate_text(
+    segments: list[Segment],
+    source_language: str = "auto",
+    target_language: str = "vi",
+    context: str = "",
+    glossary: str = "",
+    prev_context: str = "",
+    tier: str | None = None,
+) -> None:
+    """Translate already-ASR'd segments text→text (in-place).
+
+    Whisper owns the timeline; Gemini only does translation. ``segments`` is
+    mutated in place (``target_text`` filled). Quota/transient handling mirrors
+    ``transcribe_and_translate``: model loop + key pool + tenacity.
+    """
+    if not segments:
+        return
+    keys = key_pool(tier)
+    if not keys:
+        raise PermanentError(GEMINI_NOT_CONFIGURED, "GEMINI_API_KEY is not configured")
+
+    models = [DEFAULT_MODEL] + [m for m in FALLBACK_MODELS if m != DEFAULT_MODEL]
+    prompt = _prompt_translate(
+        source_language,
+        target_language,
+        context=context,
+        glossary=glossary,
+        prev_context=prev_context,
+    )
+    src_lines = [seg.source_text.strip() for seg in segments]
+    body = json.dumps(src_lines, ensure_ascii=False)
+
+    attempts = [(model, key) for model in models for key in keys]
+    last_exc: Exception | None = None
+    for model, api_key in attempts:
+        try:
+            logger.info(
+                "gemini translate model=%s key=%s lines=%d",
+                model,
+                api_key[-4:],
+                len(src_lines),
+            )
+            resp_text = await _call_text_once(_client(api_key), model, prompt + "\n" + body)
+            data = json.loads(resp_text)
+            translations = data.get("t", data.get("translations", []))
+            if not isinstance(translations, list):
+                raise TransientError(GEMINI_FAILED, "translate: no list in response")
+            n = min(len(translations), len(segments))
+            for i in range(n):
+                t = (translations[i] or "").strip()
+                if t:
+                    segments[i].target_text = t
+            # Keep the ones that were translated; drop nothing here the caller
+            # decides what to do with still-empty target_text.
+            for i in range(n, len(segments)):
+                if not segments[i].target_text.strip():
+                    segments[i].target_text = segments[i].source_text.strip()
+            logger.info("gemini translate success model=%s done=%d/%d", model, n, len(segments))
+            return
+        except QuotaExhaustedError as exc:
+            logger.warning(
+                "gemini translate quota model=%s key=%s: %s -- trying next",
+                model,
+                api_key[-4:],
+                exc.message,
+            )
+            last_exc = exc
+            continue
+        except PermanentError as exc:
+            logger.warning(
+                "gemini translate permanent model=%s key=%s: %s", model, api_key[-4:], exc.message
+            )
+            last_exc = exc
+            continue
+        except TransientError as exc:
+            logger.warning(
+                "gemini translate transient model=%s: %s -- trying fallback", model, exc.message
+            )
+            last_exc = exc
+            continue
+        except Exception as exc:
+            logger.warning("gemini translate unknown model=%s: %s", model, exc)
+            last_exc = TransientError(GEMINI_FAILED, str(exc))
+            continue
+
+    detail = getattr(last_exc, "message", None) or str(last_exc)
+    if isinstance(last_exc, QuotaExhaustedError):
+        raise QuotaExhaustedError(
+            GEMINI_FAILED, f"every gemini model is out of quota: {detail}"
+        ) from last_exc
+    if isinstance(last_exc, PermanentError):
+        raise PermanentError(GEMINI_FAILED, f"gemini translation failed: {detail}") from last_exc
+    raise TransientError(
+        GEMINI_FAILED, f"all gemini translation models failed: {detail}"
+    ) from last_exc

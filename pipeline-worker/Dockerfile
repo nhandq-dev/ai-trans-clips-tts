@@ -10,6 +10,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8006 \
     WORK_DIR=/data/pipeline-output \
     CACHE_DIR=/data/pipeline-cache \
+    WHISPER_DOWNLOAD_ROOT=/data/pipeline-cache/whisper \
+    HF_HOME=/data/pipeline-cache/hf \
     EASYOCR_MODEL_DIR=/data/pipeline-cache/easyocr
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
