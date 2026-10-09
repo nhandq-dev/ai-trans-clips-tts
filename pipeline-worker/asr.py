@@ -27,7 +27,7 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
-WHISPER_CPU_THREADS = int(os.getenv("WHISPER_CPU_THREADS", "4"))
+WHISPER_CPU_THREADS = int(os.getenv("WHISPER_CPU_THREADS", "8"))
 WHISPER_VAD_FILTER = os.getenv("WHISPER_VAD_FILTER", "1").strip().lower() not in (
     "0",
     "false",
@@ -40,6 +40,12 @@ DOWNLOAD_ROOT = os.getenv("WHISPER_DOWNLOAD_ROOT") or str(
 # Minimum/split heuristics for turning whisper text into dubbing segments.
 MIN_SEGMENT_SECONDS = float(os.getenv("ASR_MIN_SEGMENT_SECONDS", "0.4"))
 MAX_SEGMENT_SECONDS = float(os.getenv("ASR_MAX_SEGMENT_SECONDS", "8"))
+# Whisper over-fragments montage narration into ~1.4s blips (one per subtitle
+# line), each spawning its own TTS request. Adjacent segments are merged up to
+# this cap so dubbing speaks in natural sentences (~4-5x fewer TTS calls).
+MAX_MERGE_SECONDS = float(os.getenv("ASR_MAX_MERGE_SECONDS", "6"))
+# Merge only when the gap between two whisper segments is this small or less.
+MERGE_MAX_GAP_SECONDS = float(os.getenv("ASR_MERGE_MAX_GAP_SECONDS", "0.6"))
 
 _model: object | None = None
 _model_lock = threading.Lock()
@@ -110,6 +116,36 @@ def _split_on_punct(text: str) -> list[str]:
     return re.split(r"(?<=[.!?。！？])\s+", text)
 
 
+def _merge_segments(segments: list[Segment]) -> list[Segment]:
+    """Merge adjacent whisper fragments into natural dubbing sentences.
+
+    Whisper splits on short silences, so a montage's rapid narration becomes a
+    trail of ~1.4s blips — 163 blips means 163 TTS calls. We join consecutive
+    fragments while the total span stays within ``MAX_MERGE_SECONDS`` and the
+    pause between them is <= ``MERGE_MAX_GAP_SECONDS``, producing roughly
+    sentence-length segments (fewer TTS requests, smoother dubbing).
+    """
+    if not segments:
+        return []
+    merged: list[Segment] = []
+    cur_start = segments[0].start
+    cur_end = segments[0].end
+    buf: list[str] = [segments[0].source_text]
+    for seg in segments[1:]:
+        gap = seg.start - cur_end
+        # Starting a new sentence on a hard sentence boundary or a big silence,
+        # or when adding this fragment would blow past the merge cap.
+        if gap > MERGE_MAX_GAP_SECONDS or (seg.end - cur_start) > MAX_MERGE_SECONDS:
+            merged.append(Segment(start=cur_start, end=cur_end, source_text=" ".join(buf).strip()))
+            cur_start, cur_end = seg.start, seg.end
+            buf = [seg.source_text]
+        else:
+            cur_end = max(cur_end, seg.end)
+            buf.append(seg.source_text)
+    merged.append(Segment(start=cur_start, end=cur_end, source_text=" ".join(buf).strip()))
+    return [s for s in merged if s.source_text.strip()]
+
+
 async def transcribe_whisper(
     audio_path: str | Path,
     source_language: str = "auto",
@@ -133,22 +169,38 @@ async def transcribe_whisper(
             vad_filter=WHISPER_VAD_FILTER,
             word_timestamps=False,
         )
-        segments: list[Segment] = []
+        raw: list[Segment] = []
         for s in seg_gen:
             text = (s.text or "").strip()
             if not text:
                 continue
-            for piece, pstart, pend in _split_long_segment(text, float(s.start), float(s.end)):
-                if pend - pstart < MIN_SEGMENT_SECONDS:
-                    continue
-                segments.append(
-                    Segment(
-                        start=round(pstart, 3),
-                        end=round(pend, 3),
-                        source_text=piece,
-                        target_text="",
-                    )
+            raw.append(
+                Segment(
+                    start=float(s.start),
+                    end=float(s.end),
+                    source_text=text,
+                    target_text="",
                 )
+            )
+        # First merge the over-fragmented blips into sentence-length groups,
+        # then split any still-too-long group on punctuation.
+        import itertools
+
+        segments: list[Segment] = []
+        for piece, pstart, pend in itertools.chain.from_iterable(
+            _split_long_segment(s.source_text, s.start, s.end) for s in _merge_segments(raw)
+        ):
+            dur = pend - pstart
+            if dur < MIN_SEGMENT_SECONDS:
+                continue
+            segments.append(
+                Segment(
+                    start=round(pstart, 3),
+                    end=round(pend, 3),
+                    source_text=piece,
+                    target_text="",
+                )
+            )
         return (info.language or "unknown"), segments
 
     try:

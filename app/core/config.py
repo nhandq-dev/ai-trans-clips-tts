@@ -45,7 +45,8 @@ class Settings(BaseSettings):
     # scale linearly (measured 1 lane = 37.5, 4 lanes = 90.2 chars/s on 10 cores).
     tts_workers: int = 1
     # Requests admitted per process before queueing. Total in-flight is
-    # `tts_workers * tts_concurrency`, but only one synthesis runs per process.
+    # `tts_workers * tts_concurrency`. Within one process a small VieNeu model
+    # pool (VIENEU_POOL_SIZE, default 2) allows that many inferences to overlap.
     tts_concurrency: int = 2
     # Async job path (plan/014 Phase 1).
     # Ceiling for one async request. Unlike `sync_max_text_length` this is not a
@@ -68,6 +69,9 @@ class Settings(BaseSettings):
     vieneu_backend: str = "onnx"
     vieneu_default_voice: str = "Adam"
     vieneu_chunk_chars: int = 280
+    # Independent VieNeu instances held in-process so inferences overlap. RAM
+    # scales ~linearly (each int8 engine ~1-2GB); keep modest on shared VPSes.
+    vieneu_pool_size: int = 2
 
     # Kokoro-82M (all languages except Vietnamese) — on-device ONNX TTS replacing
     # edge-tts: no network at synthesis time, no Microsoft 403 blocking.

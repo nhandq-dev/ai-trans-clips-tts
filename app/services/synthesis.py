@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from collections.abc import Callable
@@ -14,34 +15,57 @@ from app.services.storage import cleanup_workdir, make_workdir, merge, output_di
 from app.services.voice_catalog import VIENEU as VIENEU_ENGINE
 from app.services.voice_catalog import VOICES
 
+logger = logging.getLogger("app.services.synthesis")
+
 ProgressCallback = Callable[[int, str], None] | None
 
 # Valid VieNeu voice ids, derived from the catalog to avoid a second source of truth.
 VIENEU_VOICES = [voice["id"] for voice in VOICES if voice["engine"] == VIENEU_ENGINE]
 
-_MODEL = None
-_MODEL_LOCK = threading.Lock()
-_INFER_LOCK = threading.Lock()
+# Model pool: a single ONNX engine serializes inference internally (its own
+# RLock), so concurrency on one instance is impossible. Keep a small pool of
+# independent instances, each protected by its own lock, acquired round-robin —
+# N instances = up to N parallel inferences. RAM scales ~linearly with the pool
+# size (each int8 engine ~1-2GB), so the default 2 is a safe bound on a 23GB VPS.
+POOL_SIZE = max(1, get_settings().vieneu_pool_size)
+
+_pool: list = []  # list[tuple[model, threading.Lock]]
+_pool_build_lock = threading.Lock()
+_pool_next = 0
 
 
-def _get_model():
-    global _MODEL
-    if _MODEL is None:
-        with _MODEL_LOCK:
-            if _MODEL is None:
-                from vieneu import Vieneu
+def _build_pool() -> None:
+    global _pool
+    if _pool:
+        return
+    with _pool_build_lock:
+        if _pool:
+            return
+        from vieneu import Vieneu
 
-                _MODEL = Vieneu(backend=get_settings().vieneu_backend)
-    return _MODEL
+        _pool = [
+            (Vieneu(backend=get_settings().vieneu_backend), threading.Lock())
+            for _ in range(POOL_SIZE)
+        ]
+        logger.info("vieneu model pool ready size=%d", len(_pool))
+
+
+def _acquire_model() -> tuple[object, threading.Lock]:
+    """Round-robin over the pool; returns (model, its lock)."""
+    _build_pool()
+    global _pool_next
+    idx = _pool_next % len(_pool)
+    _pool_next += 1
+    return _pool[idx]
 
 
 def warm_up() -> None:
-    """Load the VieNeu and Kokoro models ahead of the first request.
+    """Load the VieNeu (pool) and Kokoro models ahead of the first request.
 
     Enabled via `READINESS_WARMUP`; both engines are local now, so preloading
     pays off. Set `KOKORO_WARMUP=false` to keep Kokoro lazy on a tight-RAM VPS.
     """
-    _get_model()
+    _build_pool()
     if get_settings().kokoro_warmup:
         from app.services import kokoro
 
@@ -79,22 +103,24 @@ def _synth_vieneu(
     progress: ProgressCallback,
     voice_data: object | None = None,
 ) -> None:
-    model = _get_model()
+    model, lock = _acquire_model()
     resolved = (
         to_vieneu_voice_arg(voice_data) if voice_data is not None else _resolve_vieneu_voice(voice)
     )
     chunks = split_text(text, get_settings().vieneu_chunk_chars)
     files: list[Path] = []
-    for i, chunk in enumerate(chunks):
-        if progress:
-            progress(10 + int((i / len(chunks)) * 80), f"vieneu {i + 1}/{len(chunks)}")
-        wav = workdir / f"vieneu_{i}.wav"
-        with _INFER_LOCK:
+    # Whole synthesis holds the instance lock, so a chunked request is atomic on
+    # its instance; different instances can still run in parallel.
+    with lock:
+        for i, chunk in enumerate(chunks):
+            if progress:
+                progress(10 + int((i / len(chunks)) * 80), f"vieneu {i + 1}/{len(chunks)}")
+            wav = workdir / f"vieneu_{i}.wav"
             audio = model.infer(text=chunk, voice=resolved)
             model.save(audio, str(wav))
-        if not wav.exists() or wav.stat().st_size == 0:
-            raise RuntimeError(f"vieneu produced no audio for chunk {i + 1}/{len(chunks)}")
-        files.append(wav)
+            if not wav.exists() or wav.stat().st_size == 0:
+                raise RuntimeError(f"vieneu produced no audio for chunk {i + 1}/{len(chunks)}")
+            files.append(wav)
     merge(files, dest, "wav", fmt, workdir)
 
 
@@ -168,13 +194,14 @@ def generate_tts(
 
 def encode_reference(reference_wav: Path) -> object:
     """Encode a reference clip into a reusable VieNeu voice embedding."""
-    with _INFER_LOCK:
-        return _get_model().encode_reference(str(reference_wav))
+    model, lock = _acquire_model()
+    with lock:
+        return model.encode_reference(str(reference_wav))
 
 
 def render_sample(text: str, voice_data: object, dest: Path) -> None:
     """Synthesize `text` with a cloned voice and save the raw wav to `dest`."""
-    model = _get_model()
-    with _INFER_LOCK:
+    model, lock = _acquire_model()
+    with lock:
         audio = model.infer(text=text, voice=to_vieneu_voice_arg(voice_data))
         model.save(audio, str(dest))

@@ -52,7 +52,10 @@ def test_infer_receives_a_dict_not_a_tuple(monkeypatch):
         def save(self, audio, path):  # noqa: ANN001, ARG002
             Path(path).write_bytes(b"RIFF")
 
-    monkeypatch.setattr(synthesis, "_get_model", lambda: _FakeModel())
+    import threading  # noqa: PLC0415
+
+    # The pool hands out (model, lock); return a fake + a serializing lock.
+    monkeypatch.setattr(synthesis, "_acquire_model", lambda: (_FakeModel(), threading.Lock()))
     # `merge` is irrelevant here; keep the chunk list to one item so it runs once.
     monkeypatch.setattr(synthesis, "split_text", lambda text, limit: [text])
 

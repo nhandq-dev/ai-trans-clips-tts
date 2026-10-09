@@ -343,7 +343,7 @@ async def run_pipeline(job_id: str):
                 # Translate in batches with a rolling context window so
                 # terminology stays consistent across the whole video.
                 window = int(os.getenv("CONTEXT_WINDOW_CLIPS", "10"))
-                batch_size = int(os.getenv("TRANSLATE_BATCH", "15"))
+                batch_size = int(os.getenv("TRANSLATE_BATCH", "30"))
                 prev_lines: list[str] = []
                 for i in range(0, len(result.segments), batch_size):
                     batch = result.segments[i : i + batch_size]
