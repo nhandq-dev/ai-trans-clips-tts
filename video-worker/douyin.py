@@ -219,3 +219,15 @@ async def try_f2(
         timeout,
         proxy=proxy,
     )
+
+
+async def try_apifree(url: str, output_path: Path, timeout: int = 90) -> bool:
+    """Free third-party resolver (tainhanhvideo.com) — the only tier that works
+    from a non-China datacenter IP. Server does the signed Douyin call itself
+    and returns an expiring CDN URL we download directly."""
+    return await _run_script(
+        SCRIPTS_DIR / "fetch_douyin_apifree.py",
+        [url, str(output_path)],
+        output_path,
+        timeout,
+    )

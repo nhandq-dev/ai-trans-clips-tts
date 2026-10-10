@@ -227,15 +227,21 @@ async def _download_direct(url: str, job_id: str) -> Path | None:
 
 
 async def _download_douyin(url: str, job_id: str, stderr_log: list[str]) -> Path | None:
-    """Douyin chain: douyin-downloader → f2 → yt-dlp. No browser is ever launched.
+    """Douyin chain: apifree → douyin-downloader → f2 → yt-dlp.
 
-    ``DOUYIN_PROXY`` (residential / China) applies to every tier, because Douyin
-    403s non-China datacenter IPs even with fresh cookies.
+    No browser is ever launched. ``DOUYIN_PROXY`` (residential / China) applies
+    to the native tiers; ``try_apifree`` uses a free third-party resolver whose
+    server is not geo-blocked, so it is tried first.
     """
     template = str(output_dir() / f"{job_id}_%(title)s.%(ext)s")
     cookies = cookie_file_for("douyin")
     logged_in = douyin_logged_in_file()
     dl_out = output_dir() / f"{job_id}_douyin.mp4"
+
+    # 0) Free resolver — works from non-China IPs; no cookies needed.
+    if await douyin.try_apifree(url, dl_out):
+        logger.info("douyin tier=apifree")
+        return dl_out
 
     # 1) douyin-downloader (jiji262) — logged-in jar first, then anonymous.
     for jar in (logged_in, cookies):
