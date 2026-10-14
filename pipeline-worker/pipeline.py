@@ -604,6 +604,7 @@ async def run_pipeline(job_id: str):
                     original_volume_db=job.options.get("original_audio_volume_db", -20),
                     mute_original=job.options.get("mute_original", False),
                     slow_factor=slow_factor,
+                    flip_horizontal=job.options.get("flip_horizontal", False),
                 )
 
             # upload to S3 if configured
