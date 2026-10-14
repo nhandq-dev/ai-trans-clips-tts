@@ -252,6 +252,7 @@ async def render_translated_video(
     mute_original: bool = False,
     subtitle_style: dict | None = None,
     slow_factor: float = 1.0,
+    flip_horizontal: bool = False,
 ) -> Path:
     """Single-pass render (plan/009 T3.5): blur old subs + burn new ASS + mix audio.
 
@@ -270,6 +271,10 @@ async def render_translated_video(
     parts: list[str] = []
     vlabel = "0:v"
     dims: dict | None = None
+
+    if flip_horizontal:
+        parts.append("[0:v]hflip[vflip]")
+        vlabel = "vflip"
 
     # The whole render (blur, ASS burn, watermark) runs on the ORIGINAL timeline,
     # then `setpts` re-times the finished frames over the slower clock. The slow
@@ -290,6 +295,9 @@ async def render_translated_video(
             y = max(0, min(int(y), vh - 2))
             w = max(2, min(int(w), vw - x))
             h = max(2, min(int(h), vh - y))
+            if flip_horizontal:
+                # box was detected on the unflipped frame; mirror x after hflip
+                x = vw - x - w
             # a too-short band makes boxblur impossible (radius must be < min(w,h)/2)
             # and would blur nothing anyway -> fall back to a default bottom band
             if h < 8 or w < 8:
