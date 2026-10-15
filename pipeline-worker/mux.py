@@ -176,6 +176,10 @@ async def mix_and_mux(
             "192k",
             "-movflags",
             "+faststart",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
             str(tmp),
         ]
     else:
@@ -201,6 +205,10 @@ async def mix_and_mux(
             "192k",
             "-movflags",
             "+faststart",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
             str(tmp),
         ]
     proc = await asyncio.create_subprocess_exec(
@@ -386,7 +394,8 @@ async def render_translated_video(
     cmd = [FFMPEG_BIN, "-y", "-i", str(video_path), "-i", str(dub_path)]
     cmd += ["-filter_complex", ";".join(parts)]
     cmd += ["-map", video_map, "-map", "[aout]"]
-    cmd += vcodec + ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(tmp)]
+    cmd += vcodec + ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+    cmd += ["-map_metadata", "-1", "-map_chapters", "-1", str(tmp)]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
