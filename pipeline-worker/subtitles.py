@@ -417,9 +417,9 @@ def write_ass(
     """
     style = style or {}
     font = style.get("font", "Arial")
-    # Default font scales with the frame height (e.g. 60px on 1080p); an explicit
-    # "size" in subtitle_style still wins.
-    size = int(style.get("size", 0)) or max(28, min(64, height // 18))
+    # Default font scales with the frame height, reduced by 4px (e.g. 56px on
+    # 1080p); an explicit "size" in subtitle_style still wins.
+    size = int(style.get("size", 0)) or max(24, min(60, (height // 18) - 4))
     color = (
         _ass_color((255, 255, 255))
         if style.get("color", "white") == "white"
