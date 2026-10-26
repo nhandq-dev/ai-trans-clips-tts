@@ -27,11 +27,13 @@ COPY requirements.txt requirements-douyin.txt ./
 # Playwright/Chromium is installed ONLY for scripts/fetch_douyin_cookies.py,
 # which bootstraps an anonymous Douyin jar when none exists. Nothing in the
 # download path launches a browser.
+# Versions are pinned for reproducible builds; deploy/video-worker-libs.timer
+# upgrades yt-dlp/f2/douyin-downloader in the running container every 2 days.
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir -r requirements-douyin.txt \
-    && pip install --no-cache-dir --no-deps 'f2>=0.0.1' \
+    && pip install --no-cache-dir --no-deps 'f2==0.0.1.7' \
     && pip install --no-cache-dir \
-        'douyin-downloader @ git+https://github.com/jiji262/douyin-downloader' \
+        'douyin-downloader @ git+https://github.com/jiji262/douyin-downloader@ed863617aa52353821aca8fdebcfad4e916ebff5' \
     && playwright install --with-deps chromium
 
 COPY . .

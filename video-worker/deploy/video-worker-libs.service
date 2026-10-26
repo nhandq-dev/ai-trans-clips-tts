@@ -1,8 +1,10 @@
 [Unit]
-Description=Update video-worker libs (yt-dlp, f2)
+Description=Update video-worker libs (yt-dlp, f2, douyin-downloader)
 After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/bash -c 'docker exec video-worker pip install -U yt-dlp --no-deps "f2>=0.0.1" 2>&1 | logger -t video-worker-libs; docker restart video-worker 2>&1 | logger -t video-worker-libs; echo "libs updated $(date)" | logger -t video-worker-libs'
+ExecStart=/opt/video-worker/scripts/update-libs.sh
+StandardOutput=journal
+StandardError=journal

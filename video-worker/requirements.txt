@@ -8,12 +8,17 @@ python-multipart>=0.0.12
 python-dotenv>=1.0.0
 
 httpx>=0.28.0
-yt-dlp>=2024.12.0
-playwright>=1.40.0
+# Latest stable as of 2026-10-25. yt-dlp ships extractor fixes weekly, so this
+# floor is bumped deliberately; the VPS auto-updater keeps it current at runtime
+# (deploy/video-worker-libs.timer).
+yt-dlp>=2026.10.21
+playwright>=1.64.1
 boto3>=1.35.0
 
 # Douyin (a_bogus signing) is installed separately:
 #   pip install -r requirements-douyin.txt
-#   pip install --no-deps 'f2>=0.0.1'
+#   pip install --no-deps 'f2==0.0.1.7'
 # `f2` pins httpx to 0.25/0.27, which conflicts with the web stack above, so it
 # must be installed with --no-deps (it works fine against httpx>=0.28).
+# 0.0.1.7 (2024-12-31) is the last release; the project is unmaintained, so the
+# tier is kept only as a fallback behind the free resolver.

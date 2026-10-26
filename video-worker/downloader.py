@@ -5,7 +5,8 @@ Adapted from video-translator-saas/ai-worker/routes/download.py:
 - cookies now resolve from the on-disk cookie store (see cookies.py)
 - added an explicit platform allowlist (see platforms.py)
 - general platforms: the yt-dlp trial matrix (plain → cookies → proxy → cookies+proxy)
-- Douyin: douyin-downloader → f2 → yt-dlp, then a typed error. No browser.
+- Douyin: apifree resolver → douyin-downloader → f2 → yt-dlp, then a typed error.
+  No browser.
 """
 
 from __future__ import annotations
@@ -231,8 +232,11 @@ async def _download_douyin(url: str, job_id: str, stderr_log: list[str]) -> Path
 
     No browser is ever launched. ``DOUYIN_PROXY`` (residential / China) applies
     to the native tiers; ``try_apifree`` uses a free third-party resolver whose
-    server is not geo-blocked, so it is tried first.
+    server is not geo-blocked, so it is tried first. The resolver now requires a
+    session-bound nonce; see ``scripts/fetch_douyin_apifree.py``.
     """
+    # The resolver rejects v.douyin.com share links; expand them first.
+    url = await asyncio.to_thread(douyin.canonical_url, url)
     template = str(output_dir() / f"{job_id}_%(title)s.%(ext)s")
     cookies = cookie_file_for("douyin")
     logged_in = douyin_logged_in_file()
@@ -366,8 +370,8 @@ async def download(url: str, job_id: str) -> DownloadResult:
             "; ".join(stderr_log)[-1000:],
             message=(
                 "Douyin could not be downloaded. Douyin blocks requests from outside "
-                "China, so all three download methods failed. Try again later, or "
-                "upload the video manually."
+                "China, so the native downloaders failed and the free resolver was "
+                "unavailable. Try again later, or upload the video manually."
             ),
         )
 

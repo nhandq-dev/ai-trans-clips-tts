@@ -2,23 +2,33 @@
 
 Download chain (see `downloader._download_douyin`):
 
-    1. douyin-downloader (jiji262) — logged-in jar, then anonymous
-    2. f2 (a_bogus signing)        — logged-in jar, then anonymous
-    3. yt-dlp                      — with cookies, refreshed once
+    0. free resolver (tainhanhvideo) — server-side signing, no cookies/proxy
+    1. douyin-downloader (jiji262)   — logged-in jar, then anonymous
+    2. f2 (a_bogus signing)          — logged-in jar, then anonymous
+    3. yt-dlp                        — with cookies, refreshed once
 
 No browser is ever launched. This module also provides the best-effort metadata
 used by `/info` (the iesdouyin SSR page, falling back to tikwm).
+
+Douyin now gates its web API behind `ArgusSecurityPlugin` — a page-SDK
+signature (`x-secsdk-web-signature`) that no HTTP client can produce. That is
+why the native tiers only work from a China/residential IP with a live
+logged-in jar, and why the resolver is tried first.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import re
 import sys
 from pathlib import Path
 
 import httpx
+
+logger = logging.getLogger("video-worker")
 
 UA_DESKTOP = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -56,6 +66,21 @@ def resolve_aweme_id(url: str) -> str | None:
         return m.group(1)
     m = _ANY_ID_RE.search(url)
     return m.group(1) if m else None
+
+
+def canonical_url(url: str) -> str:
+    """Expand a `v.douyin.com` short link to a full `/video/<id>` URL.
+
+    The free resolver rejects short/share-container links with 400, and a
+    canonical URL also lets the yt-dlp cache key stay stable across share texts.
+    """
+    if "v.douyin.com" not in url:
+        return url
+    resolved = resolve_short_url(url)
+    aweme_id = resolve_aweme_id(resolved)
+    if aweme_id:
+        return f"https://www.douyin.com/video/{aweme_id}"
+    return resolved
 
 
 # --------------------------------------------------------------------------
@@ -168,7 +193,7 @@ async def _run_script(
     if not script.is_file():
         return False
     try:
-        env = dict(__import__("os").environ)
+        env = dict(os.environ)
         if proxy:
             env["DOUYIN_PROXY"] = proxy
         proc = await asyncio.create_subprocess_exec(
@@ -180,15 +205,19 @@ async def _run_script(
             env=env,
         )
         try:
-            await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:  # noqa: UP041 - this image runs Python 3.10
             proc.kill()
+            logger.warning("douyin script %s timed out after %ss", script.name, timeout)
             output_path.unlink(missing_ok=True)
             return False
         if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1024:
             return True
-    except Exception:
-        pass
+        message = (stderr or b"").decode(errors="replace").strip()
+        if message:
+            logger.warning("douyin script %s failed: %s", script.name, message[-500:])
+    except Exception as exc:
+        logger.warning("douyin script %s crashed: %s", script.name, exc)
     output_path.unlink(missing_ok=True)
     return False
 
@@ -221,10 +250,15 @@ async def try_f2(
     )
 
 
-async def try_apifree(url: str, output_path: Path, timeout: int = 90) -> bool:
+async def try_apifree(url: str, output_path: Path, timeout: int | None = None) -> bool:
     """Free third-party resolver (tainhanhvideo.com) — the only tier that works
     from a non-China datacenter IP. Server does the signed Douyin call itself
-    and returns an expiring CDN URL we download directly."""
+    and returns an expiring CDN URL we download directly.
+
+    The timeout covers the resolver handshake AND the media download, so it is
+    deliberately longer than the API timeout used by the native tiers.
+    """
+    timeout = timeout or int(os.getenv("DOUYIN_APIFREE_TIMEOUT_SECONDS", "300"))
     return await _run_script(
         SCRIPTS_DIR / "fetch_douyin_apifree.py",
         [url, str(output_path)],

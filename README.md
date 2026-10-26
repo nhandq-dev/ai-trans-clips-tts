@@ -184,7 +184,9 @@ TikTok, Douyin, Pinterest, Bilibili) and streams it back.
 - Auth: HMAC-signed requests (`X-Video-*`); `/health` is unauthenticated
 - General platforms: `yt-dlp` trial matrix (plain → cookies → proxy → cookies+proxy), preferring
   H.264 + AAC so the output plays in QuickTime/Safari/iOS
-- Douyin: `douyin-downloader` → `f2` → `yt-dlp`, then a typed error. No browser is launched
+- Douyin: free resolver (nonce handshake) → `douyin-downloader` → `f2` → `yt-dlp`, then a typed
+  error. No browser is launched. `scripts/fetch_douyin_apifree.py` carries the handshake so the
+  resolver keeps working without cookies or a China proxy.
 - Cookies: Netscape jars read per request from `COOKIE_DIR`; managed by `video-worker/scripts/cookiectl`
   (VPS) and `video-worker/scripts/export-brave-cookies.sh` (developer machine). Never commit jars.
 
