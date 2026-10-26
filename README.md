@@ -6,7 +6,7 @@ Uvicorn, deployed as containers behind Caddy on the same hostname (separated by 
 | | TTS worker | Video worker |
 |---|---|---|
 | Source | `app/` | `video-worker/` |
-| Image | `ghcr.io/nhandq-dev/tts-worker` | `ghcr.io/nhandq-dev/video-worker` |
+| Image | `ghcr.io/nhandq-dev/tts-worker` | `ghcr.io/nhandq-dev/ai-trans-clips-tts/video-worker` |
 | Port (loopback) | `127.0.0.1:8004` | `127.0.0.1:8005` |
 | Public path | `https://tts-api.aitransclips.com/*` | `https://tts-api.aitransclips.com/video/*` |
 | Deploy dir | `/opt/tts-worker` | `/opt/video-worker` |

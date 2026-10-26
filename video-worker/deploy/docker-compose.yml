@@ -1,6 +1,6 @@
 services:
   video-worker:
-    image: ghcr.io/nhandq-dev/video-worker:${IMAGE_TAG:-latest}
+    image: ghcr.io/nhandq-dev/ai-trans-clips-tts/video-worker:${IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file: .env
     ports:
