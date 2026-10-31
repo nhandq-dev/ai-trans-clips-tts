@@ -290,9 +290,7 @@ def _pick_first_line(boxes: list[list[int]]) -> list[list[int]]:
     dominant = max(clusters, key=lambda cl: len(cl["vals"]))
     heights = sorted(b[3] - b[2] for b in boxes)
     line_height = max(1, heights[len(heights) // 2])
-    caption = [
-        cl for cl in clusters if abs(cl["mean"] - dominant["mean"]) <= 2.5 * line_height
-    ]
+    caption = [cl for cl in clusters if abs(cl["mean"] - dominant["mean"]) <= 2.5 * line_height]
     best = min(caption, key=lambda cl: cl["mean"])
     band_min = min(best["vals"])
     band_max = max(best["vals"])
