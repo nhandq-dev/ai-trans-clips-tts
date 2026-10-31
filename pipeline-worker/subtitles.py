@@ -1,10 +1,11 @@
 """Subtitle handling — detect original box, blur it, render new ASS (plan/009 T3.2-T3.4).
 
 Detection prefers OCR (EasyOCR), ported from the legacy video-translator-saas
-worker: it samples frames, runs EasyOCR's text detector, clusters detections
-into vertical lines and keeps the dominant line — so the real subtitle row is
-found accurately and watermarks are filtered out. The cv2 contour heuristic is
-kept as a fallback when EasyOCR is not installed.
+worker: it samples the 5-15s window, runs EasyOCR's text detector, clusters
+detections into vertical lines and keeps the first (top) line — so the real
+subtitle row is found accurately, a second caption line is ignored, and
+watermarks are filtered out. The cv2 contour heuristic is kept as a fallback
+when EasyOCR is not installed.
 """
 
 from __future__ import annotations
@@ -33,15 +34,23 @@ STABLE_RATIO = float(os.getenv("SUBTITLE_STABLE_RATIO", "0.6"))
 # are still found.
 REGION_RATIO = float(os.getenv("SUBTITLE_REGION_RATIO", "0.5"))
 
-# OCR scan params (legacy port): how far into the video to sample, the sampling
-# step, and how many seconds of confirmation after the first text hit.
-OCR_MAX_DURATION = float(os.getenv("SUBTITLE_OCR_MAX_DURATION", "120"))
-OCR_INTERVAL = float(os.getenv("SUBTITLE_OCR_INTERVAL", "2"))
+# OCR scan window (seconds): start after the opening and stop early. Titles /
+# intro cards at 0-5s are usually centered text, and detecting them made the
+# blur land in the middle of the clip. Real subtitles already show by 5s.
+OCR_START_SECONDS = float(os.getenv("SUBTITLE_OCR_START_SECONDS", "5"))
+OCR_MAX_DURATION = float(os.getenv("SUBTITLE_OCR_MAX_DURATION", "15"))
+OCR_INTERVAL = float(os.getenv("SUBTITLE_OCR_INTERVAL", "1"))
 OCR_CONFIRM_SECONDS = float(os.getenv("SUBTITLE_OCR_CONFIRM_SECONDS", "2"))
 
+# Vertical tolerance (px) when clustering detections into lines. Kept well
+# below the gap between two caption lines so a two-line caption splits into two
+# clusters and only the first line is used.
+LINE_CLUSTER_PX = float(os.getenv("SUBTITLE_LINE_CLUSTER_PX", "24"))
+
 # Upper bound (px) for the detected subtitle band height; shared with mux.py so
-# the blur band and the box never disagree. 120 covers large two-line captions.
-MAX_BLUR_HEIGHT = int(os.getenv("SUBTITLE_MAX_BLUR_HEIGHT", "120"))
+# the blur band and the box never disagree. One caption line only, so 100px is
+# already generous (even on 1080p).
+MAX_BLUR_HEIGHT = int(os.getenv("SUBTITLE_MAX_BLUR_HEIGHT", "100"))
 
 _OCR_READER: object | None = None
 _OCR_READER_LOCK = threading.Lock()
@@ -101,6 +110,20 @@ async def _probe(path: str | Path) -> dict:
     }
 
 
+def _scan_window(duration: float) -> tuple[float, float]:
+    """Seconds range to sample: skip the opening, stop before the clip ends.
+
+    Very short clips fall back to scanning from 0 so detection still has frames.
+    """
+    start = max(0.0, OCR_START_SECONDS)
+    if duration and start >= duration - 1.0:
+        start = 0.0
+    end = OCR_MAX_DURATION
+    if duration:
+        end = min(end, duration)
+    return start, max(start, end)
+
+
 def _detect_boxes_in_frame(
     gray: np.ndarray, region_y: int, region_h: int, width: int
 ) -> list[tuple[int, int, int, int]]:
@@ -154,13 +177,21 @@ async def _detect_box_cv2(
         region_h = max(8, int(height * REGION_RATIO))
         region_y, region_h = height - region_h, region_h
 
-    # sample frames at SAMPLE_FPS (cap MAX_SAMPLES) via ffmpeg -> rawvideo gray
-    fps = min(SAMPLE_FPS, MAX_SAMPLES / max(duration, 1.0)) if duration else SAMPLE_FPS
+    # sample frames at SAMPLE_FPS (cap MAX_SAMPLES) via ffmpeg -> rawvideo gray.
+    # Only the 5-15s window is decoded, so a title card at the start cannot be
+    # mistaken for the subtitle row.
+    start, end = _scan_window(duration)
+    window = max(0.5, end - start)
+    fps = min(SAMPLE_FPS, MAX_SAMPLES / window)
     fps = max(fps, 0.2)
     proc = await asyncio.create_subprocess_exec(
         FFMPEG_BIN,
         "-v",
         "quiet",
+        "-ss",
+        f"{start:.3f}",
+        "-t",
+        f"{window:.3f}",
         "-i",
         str(video_path),
         "-vf",
@@ -223,7 +254,7 @@ async def _detect_box_cv2(
     x = max(0, min(x, width - 1))
     y = max(0, min(y, height - 1))
     w = max(1, min(w, width - x))
-    h = max(1, min(h, height - y))
+    h = max(1, min(h, height - y, MAX_BLUR_HEIGHT))
     return {
         "x": x,
         "y": y,
@@ -234,13 +265,47 @@ async def _detect_box_cv2(
     }
 
 
+def _pick_first_line(boxes: list[list[int]]) -> list[list[int]]:
+    """Return the boxes of the top-most supported text line.
+
+    A two-line caption produces two vertical clusters; only the first (top)
+    line is kept, so the second line underneath is not blurred.
+    """
+    centers = [(b[2] + b[3]) / 2 for b in boxes]
+    clusters: list[dict] = []
+    for c in sorted(centers):
+        placed = False
+        for cl in clusters:
+            if abs(c - cl["mean"]) <= LINE_CLUSTER_PX:
+                cl["vals"].append(c)
+                cl["mean"] = sum(cl["vals"]) / len(cl["vals"])
+                placed = True
+                break
+        if not placed:
+            clusters.append({"vals": [c], "mean": c})
+
+    # Lines of one caption sit close together: take the top-most cluster within
+    # a couple of line heights of the dominant line. Text farther above it is
+    # unrelated (logo/watermark) and is ignored.
+    dominant = max(clusters, key=lambda cl: len(cl["vals"]))
+    heights = sorted(b[3] - b[2] for b in boxes)
+    line_height = max(1, heights[len(heights) // 2])
+    caption = [
+        cl for cl in clusters if abs(cl["mean"] - dominant["mean"]) <= 2.5 * line_height
+    ]
+    best = min(caption, key=lambda cl: cl["mean"])
+    band_min = min(best["vals"])
+    band_max = max(best["vals"])
+    return [b for b in boxes if band_min - 10 <= (b[2] + b[3]) / 2 <= band_max + 10]
+
+
 def _detect_with_easyocr(video_path: Path, position: str) -> dict | None:
     """OCR-based detection, ported from the legacy video-translator-saas worker.
 
-    Samples frames every ``OCR_INTERVAL`` seconds up to ``OCR_MAX_DURATION``,
+    Samples frames every ``OCR_INTERVAL`` seconds inside the 5-15s window,
     runs EasyOCR's text detector on the top/bottom region, clusters the detected
-    boxes into vertical lines and keeps the dominant line (the one that appears
-    most consistently at the same height — filters watermarks/one-off text).
+    boxes into vertical lines and keeps the first (top) line — so a two-line
+    caption only blurs its first row and watermarks/one-off text are ignored.
     Returns None when no subtitle text is found.
     """
     reader = _ocr_reader()
@@ -258,11 +323,14 @@ def _detect_with_easyocr(video_path: Path, position: str) -> dict | None:
         if width == 0 or height == 0 or fps == 0:
             raise TransientError(SUBTITLE_DETECT_FAILED, "cannot determine video dims for OCR")
 
-        sample_count = min(total_frames, int(fps * OCR_MAX_DURATION))
+        duration = total_frames / fps
+        scan_start, scan_end = _scan_window(duration)
+        sample_count = min(total_frames, int(fps * scan_end))
+        sample_start = min(sample_count, int(fps * scan_start))
         step = max(1, int(fps * OCR_INTERVAL))
         region_h = max(8, int(height * REGION_RATIO))
 
-        for frame_idx in range(0, sample_count, step):
+        for frame_idx in range(sample_start, sample_count, step):
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -305,41 +373,27 @@ def _detect_with_easyocr(video_path: Path, position: str) -> dict | None:
     if not all_boxes:
         return None
 
-    # Cluster detections into vertical lines; the dominant cluster is the subtitle.
-    centers = [(b[2] + b[3]) / 2 for b in all_boxes]
-    clusters: list[dict] = []
-    for c in sorted(centers):
-        placed = False
-        for cl in clusters:
-            if abs(c - cl["mean"]) <= 40:
-                cl["vals"].append(c)
-                cl["mean"] = sum(cl["vals"]) / len(cl["vals"])
-                placed = True
-                break
-        if not placed:
-            clusters.append({"vals": [c], "mean": c})
-
-    best = max(clusters, key=lambda cl: len(cl["vals"]))
-    band_min = min(best["vals"])
-    band_max = max(best["vals"])
-    best_boxes = [b for b in all_boxes if band_min - 10 <= (b[2] + b[3]) / 2 <= band_max + 10]
+    # Keep only the first (top) subtitle line; a second line is not blurred.
+    best_boxes = _pick_first_line(all_boxes)
 
     arr = np.array(best_boxes)
-    final_y_min = int(np.min(arr[:, 2]))
+    line_top = int(np.min(arr[:, 2]))
+    line_bottom = int(np.max(arr[:, 3]))
 
     padding = 10
-    # Anchor to the top edge of the dominant line, cap the region height.
-    result_y = max(0, final_y_min - padding)
+    # Anchor to this single line and cap the band height at MAX_BLUR_HEIGHT.
+    result_y = max(0, line_top - padding)
     if width > height:
         result_w = int(width * 0.65)
         result_x = int((width - result_w) / 2)
     else:
         result_w = width - 2 * padding
         result_x = padding
-    result_h = min(MAX_BLUR_HEIGHT, max(1, height - result_y))
+    line_h = max(1, line_bottom - line_top + 2 * padding)
+    result_h = min(MAX_BLUR_HEIGHT, line_h, max(1, height - result_y))
 
     logger.info(
-        "OCR subtitle region: x=%d y=%d w=%d h=%d (from %d detections in dominant line, %d total)",
+        "OCR subtitle region: x=%d y=%d w=%d h=%d (first line: %d detections, %d total)",
         result_x,
         result_y,
         result_w,
