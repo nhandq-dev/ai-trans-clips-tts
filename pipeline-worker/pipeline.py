@@ -577,6 +577,8 @@ async def run_pipeline(job_id: str):
                     from subtitles import write_ass
 
                     info = await media_probe(source_mp4)
+                    # With blur disabled the original subtitles stay visible, so
+                    # the new line always sits at the very bottom of the frame.
                     box_for_ass = blur_box or {
                         "x": 0,
                         "y": int(info["height"] * 0.75),

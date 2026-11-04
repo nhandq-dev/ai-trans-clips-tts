@@ -52,6 +52,13 @@ LINE_CLUSTER_PX = float(os.getenv("SUBTITLE_LINE_CLUSTER_PX", "24"))
 # already generous (even on 1080p).
 MAX_BLUR_HEIGHT = int(os.getenv("SUBTITLE_MAX_BLUR_HEIGHT", "100"))
 
+# Subtitle typography. Fontsize is in ASS px on the PlayRes canvas. Long
+# segments are split into shorter cues, and each cue wraps onto at most a few
+# lines, so a caption never stretches across the whole frame.
+FONT_SIZE = int(os.getenv("SUBTITLE_FONT_SIZE", "14"))
+MAX_LINE_CHARS = int(os.getenv("SUBTITLE_MAX_LINE_CHARS", "42"))
+MAX_LINES = max(1, int(os.getenv("SUBTITLE_MAX_LINES", "2")))
+
 _OCR_READER: object | None = None
 _OCR_READER_LOCK = threading.Lock()
 
@@ -450,6 +457,34 @@ def _ass_time(seconds: float) -> str:
     return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
 
+def _split_words(text: str, max_chars: int) -> list[str]:
+    """Break text on spaces into chunks no longer than ``max_chars``.
+
+    A single word longer than the limit is kept intact (it cannot be broken on
+    a space), but every other chunk stays within the limit.
+    """
+    words = " ".join(text.split()).split(" ")
+    chunks: list[str] = []
+    current = ""
+    for word in words:
+        if not word:
+            continue
+        candidate = f"{current} {word}".strip()
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [""]
+
+
+def _wrap_text(text: str, max_chars: int) -> str:
+    """Wrap text into ASS lines (``\\N``) no longer than ``max_chars``."""
+    return "\\N".join(_split_words(text, max_chars))
+
+
 def write_ass(
     result: TranscriptionResult,
     box: dict,
@@ -469,15 +504,16 @@ def write_ass(
     """
     style = style or {}
     font = style.get("font", "Arial")
-    # Default font scales with the frame height, reduced by 4px (e.g. 56px on
-    # 1080p); an explicit "size" in subtitle_style still wins.
-    size = int(style.get("size", 0)) or max(24, min(60, (height // 18) - 4))
+    # Fixed, compact default (14px). An explicit "size" in subtitle_style or the
+    # SUBTITLE_FONT_SIZE env still wins.
+    size = int(style.get("size", 0)) or FONT_SIZE
     color = (
         _ass_color((255, 255, 255))
         if style.get("color", "white") == "white"
         else _ass_color((255, 255, 0))
     )
-    outline = int(style.get("outline", 2))
+    # A thin outline at small sizes; 2px would swallow a 14px glyph.
+    outline = int(style.get("outline", 1 if size <= 24 else 2))
 
     # ASS alignment 2 = bottom-center; place at the box bottom
     box_bottom = box["y"] + box["h"]
@@ -505,11 +541,26 @@ def write_ass(
         f"{_ASS_EVENT_FORMAT_LINE}\n"
     )
     lines = []
+    cue_limit = max(1, MAX_LINE_CHARS * MAX_LINES)
     for seg in result.segments:
-        text = seg.target_text.replace("\n", "\\N")
-        s = seg.start * time_scale
-        e = seg.end * time_scale
-        lines.append(f"Dialogue: 0,{_ass_time(s)},{_ass_time(e)},Default,,0,0,0,,{text}")
+        text = " ".join(seg.target_text.split())
+        if not text:
+            continue
+        # Long segments are split into shorter cues over the same time span, so
+        # the caption does not cover the whole screen for its entire duration.
+        chunks = _split_words(text, cue_limit)
+        total = sum(len(chunk) for chunk in chunks) or 1
+        duration = max(0.0, seg.end - seg.start)
+        cursor = seg.start
+        for idx, chunk in enumerate(chunks):
+            share = duration * len(chunk) / total
+            start = cursor
+            end = seg.end if idx == len(chunks) - 1 else cursor + share
+            cursor = end
+            lines.append(
+                f"Dialogue: 0,{_ass_time(start * time_scale)},{_ass_time(end * time_scale)},"
+                f"Default,,0,0,0,,{_wrap_text(chunk, MAX_LINE_CHARS)}"
+            )
     out_path = Path(out_path)
     tmp = Path(str(out_path) + ".tmp")
     tmp.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")

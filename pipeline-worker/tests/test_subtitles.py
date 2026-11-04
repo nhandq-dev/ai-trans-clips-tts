@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import subtitles  # noqa: E402
+from schemas import Segment, TranscriptionResult  # noqa: E402
 
 
 def test_scan_window_skips_opening_and_stops_early(monkeypatch):
@@ -51,3 +52,45 @@ def test_pick_first_line_prefers_top_line_even_with_fewer_hits():
     picked = subtitles._pick_first_line(boxes)
     assert picked
     assert all(b[3] <= 830 for b in picked)
+
+
+def test_split_words_respects_limit():
+    text = "mot hai ba bon nam sau bay tam chin muoi"
+    chunks = subtitles._split_words(text, 12)
+    assert chunks
+    assert all(len(chunk) <= 12 for chunk in chunks)
+
+
+def test_write_ass_uses_small_font_and_splits_long_cues(tmp_path, monkeypatch):
+    monkeypatch.setattr(subtitles, "FONT_SIZE", 14)
+    monkeypatch.setattr(subtitles, "MAX_LINE_CHARS", 42)
+    monkeypatch.setattr(subtitles, "MAX_LINES", 2)
+    result = TranscriptionResult(
+        detected_language="en",
+        segments=[
+            Segment(
+                start=0.0,
+                end=8.0,
+                source_text="source",
+                target_text=(
+                    "Đây là một câu phụ đề rất dài để kiểm tra việc tự động "
+                    "xuống dòng và chia nhỏ thành nhiều đoạn ngắn hơn."
+                ),
+            )
+        ],
+    )
+    out = subtitles.write_ass(
+        result,
+        {"x": 0, "y": 900, "w": 1080, "h": 100},
+        tmp_path / "out.ass",
+        width=1080,
+        height=1920,
+    )
+    content = out.read_text(encoding="utf-8")
+    assert ",14," in next(line for line in content.splitlines() if line.startswith("Style:"))
+    dialogues = [line for line in content.splitlines() if line.startswith("Dialogue:")]
+    # The long caption is split into shorter cues instead of one screen-filling row.
+    assert len(dialogues) >= 2
+    for line in dialogues:
+        text = line.rsplit(",", 1)[-1]
+        assert text.count("\\N") <= 1
