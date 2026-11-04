@@ -62,7 +62,7 @@ def test_split_words_respects_limit():
 
 
 def test_write_ass_uses_configured_font_and_splits_long_cues(tmp_path, monkeypatch):
-    monkeypatch.setattr(subtitles, "FONT_SIZE", 18)
+    monkeypatch.setattr(subtitles, "FONT_SIZE", 24)
     monkeypatch.setattr(subtitles, "MAX_LINE_CHARS", 42)
     monkeypatch.setattr(subtitles, "MAX_LINES", 2)
     result = TranscriptionResult(
@@ -87,7 +87,7 @@ def test_write_ass_uses_configured_font_and_splits_long_cues(tmp_path, monkeypat
         height=1920,
     )
     content = out.read_text(encoding="utf-8")
-    assert ",18," in next(line for line in content.splitlines() if line.startswith("Style:"))
+    assert ",24," in next(line for line in content.splitlines() if line.startswith("Style:"))
     dialogues = [line for line in content.splitlines() if line.startswith("Dialogue:")]
     # The long caption is split into shorter cues instead of one screen-filling row.
     assert len(dialogues) >= 2
