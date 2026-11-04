@@ -66,6 +66,43 @@ def _client(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def _localization_rules(target_language: str) -> str:
+    """Localization block shared by both translation prompts.
+
+    The audience should hear the line as if it was originally produced for
+    them: idioms, currency, units and dates follow the target locale instead
+    of being translated word-for-word.
+    """
+    is_vi = target_language.split("-")[0].lower() == "vi"
+    if is_vi:
+        return (
+            "Localization (CRITICAL):\n"
+            "- Translate the meaning, not the words. Adapt idioms, slang, jokes, names and "
+            "cultural references so they sound natural to a Vietnamese viewer.\n"
+            "- Localize currency: convert every foreign amount to Vietnamese đồng (VND) using "
+            "a reasonable current exchange rate, rounded naturally, and write it in words. "
+            'Examples: "$100" -> "khoảng hai triệu sáu trăm nghìn đồng"; "20 nhân dân tệ" -> '
+            '"khoảng bảy mươi nghìn đồng". Keep a foreign currency only when the speaker is '
+            "explicitly discussing that currency (e.g. an exchange rate).\n"
+            "- Localize units and measurements: miles -> km, feet/inches -> mét/xăng-ti-mét, "
+            "pounds -> kg, ounces -> gram, gallons -> lít, °F -> °C. Write the numbers in words.\n"
+            "- Localize dates and times to Vietnamese conventions (ngày/tháng/năm, 24-hour clock) "
+            "when it is natural.\n"
+            "- Do not add explanations, parentheses or the original amount; say only what a "
+            "Vietnamese speaker would say.\n"
+        )
+    return (
+        "Localization (CRITICAL):\n"
+        "- Translate the meaning, not the words. Adapt idioms, slang, jokes, names and cultural "
+        f"references so they sound natural to a {target_language} audience.\n"
+        "- Localize currency amounts and measurement units to the conventions of the target "
+        "locale, using a reasonable current exchange rate and rounding naturally.\n"
+        "- Localize dates and times to the target locale's conventions when it is natural.\n"
+        "- Do not add explanations, parentheses or the original amount; say only what a local "
+        "speaker would say.\n"
+    )
+
+
 def _prompt(
     source_language: str = "auto",
     target_language: str = "vi",
@@ -111,6 +148,7 @@ def _prompt(
         f"Match the duration of the original speech.\n"
         "- Ensure contextually accurate translation. Follow the glossary strictly.\n"
         + numbers
+        + _localization_rules(target_language)
         + '\nIf no speech is detected, output: {"lang":"unknown","s":[]}'
     )
 
@@ -180,6 +218,7 @@ def _prompt_translate(
         "- Match the tone and duration of the original speech.\n"
         "- Ensure contextually accurate translation. Follow the glossary strictly.\n"
         + numbers
+        + _localization_rules(target_language)
         + "- If a line is unclear, translate it literally as best you can.\n"
         "No prose outside the JSON."
     )

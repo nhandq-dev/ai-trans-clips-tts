@@ -17,6 +17,10 @@ CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", str(7 * 24 * 3600)))  # 7
 CACHE_MAX_SIZE_MB = int(os.getenv("CACHE_MAX_SIZE_MB", "2048"))  # 2GB
 CACHE_MAX_FILES = int(os.getenv("CACHE_MAX_FILES", "5000"))
 
+# Bump when the translation prompt changes, so cached Gemini segments from an
+# older prompt (e.g. before currency localization) are not reused.
+PROMPT_VERSION = os.getenv("GEMINI_PROMPT_VERSION", "2026-11-localization")
+
 # Hit/miss counters for /metrics (plan/009 T5.3).
 _stats = {"hits": 0, "misses": 0, "writes": 0, "evictions": 0}
 
@@ -44,6 +48,7 @@ def gemini_cache_key(audio_bytes: bytes, source_lang: str, target_lang: str, mod
     h.update(source_lang.encode())
     h.update(target_lang.encode())
     h.update(model.encode())
+    h.update(PROMPT_VERSION.encode())
     return f"gemini_{h.hexdigest()[:16]}.json"
 
 
