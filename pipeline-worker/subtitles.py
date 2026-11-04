@@ -55,7 +55,7 @@ MAX_BLUR_HEIGHT = int(os.getenv("SUBTITLE_MAX_BLUR_HEIGHT", "100"))
 # Subtitle typography. Fontsize is in ASS px on the PlayRes canvas. Long
 # segments are split into shorter cues, and each cue wraps onto at most a few
 # lines, so a caption never stretches across the whole frame.
-FONT_SIZE = int(os.getenv("SUBTITLE_FONT_SIZE", "14"))
+FONT_SIZE = int(os.getenv("SUBTITLE_FONT_SIZE", "18"))
 MAX_LINE_CHARS = int(os.getenv("SUBTITLE_MAX_LINE_CHARS", "42"))
 MAX_LINES = max(1, int(os.getenv("SUBTITLE_MAX_LINES", "2")))
 
@@ -504,7 +504,7 @@ def write_ass(
     """
     style = style or {}
     font = style.get("font", "Arial")
-    # Fixed, compact default (14px). An explicit "size" in subtitle_style or the
+    # Fixed default (18px). An explicit "size" in subtitle_style or the
     # SUBTITLE_FONT_SIZE env still wins.
     size = int(style.get("size", 0)) or FONT_SIZE
     color = (
@@ -512,7 +512,7 @@ def write_ass(
         if style.get("color", "white") == "white"
         else _ass_color((255, 255, 0))
     )
-    # A thin outline at small sizes; 2px would swallow a 14px glyph.
+    # A thin outline at small sizes; 2px would swallow an 18px glyph.
     outline = int(style.get("outline", 1 if size <= 24 else 2))
 
     # ASS alignment 2 = bottom-center; place at the box bottom
