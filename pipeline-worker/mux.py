@@ -248,6 +248,22 @@ async def _video_fps(path: str | Path) -> float:
         return 0.0
 
 
+def _atempo_chain(speed: float) -> str:
+    """ffmpeg atempo per-filter range is 0.5-2.0; chain for values outside it."""
+    if speed <= 0:
+        speed = 1.0
+    factors: list[float] = []
+    remaining = speed
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    factors.append(remaining)
+    return ",".join(f"atempo={f:.4f}" for f in factors)
+
+
 async def render_translated_video(
     video_path: str | Path,
     dub_path: str | Path,
@@ -260,6 +276,7 @@ async def render_translated_video(
     mute_original: bool = False,
     subtitle_style: dict | None = None,
     slow_factor: float = 1.0,
+    dub_speed: float = 1.0,
     flip_horizontal: bool = False,
 ) -> Path:
     """Single-pass render (plan/009 T3.5): blur old subs + burn new ASS + mix audio.
@@ -268,9 +285,11 @@ async def render_translated_video(
     ``blur_box`` is None no blur happens. ``watermark`` is drawn last, moving
     diagonally across the frame (white, 40% opacity).
 
-    ``slow_factor`` > 1 slows the output video (``setpts=PTS*S``) so the
-    naturally-paced dub fits — subtitles/watermark are burned on the slowed
-    stream, and the original audio (if kept) is stretched with ``atempo``.
+    ``slow_factor`` retimes the final output (``setpts=PTS*S``). ``dub_speed``
+    tempo-changes the dub track (laid out on the base dub timeline) so it stays
+    in sync when the user requests a faster/slower final output. Subtitles are
+    burned on the source timeline and retimed by the final ``setpts``; the kept
+    original audio (if any) is stretched with ``atempo`` to match.
     """
     video_path, dub_path, out_path = Path(video_path), Path(dub_path), Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -285,14 +304,12 @@ async def render_translated_video(
         vlabel = "vflip"
 
     # The whole render (blur, ASS burn, watermark) runs on the ORIGINAL timeline,
-    # then `setpts` re-times the finished frames over the slower clock. The slow
+    # then `setpts` re-times the finished frames over the output clock. The retime
     # must be applied ONLY at the end: on this ffmpeg build the `overlay` filter
     # (used for the blur band) re-syncs to a CFR rate and, when fed already-
-    # stretched timestamps, piles duplicate frames at EOF — footage at original
-    # speed followed by a frozen tail while the dub keeps playing. Burning first
-    # keeps regular timestamps inside overlay, and one final setpts preserves the
-    # frame count (verified: 3698 -> 3698 frames over the 1.5x duration). The ASS
-    # burn uses source-domain times via `write_ass(time_scale=1/S)`.
+    # stretched timestamps, piles duplicate frames at EOF. Burning first keeps
+    # regular timestamps inside overlay, and one final setpts preserves the frame
+    # count. The ASS burn uses source-domain times via `write_ass(time_scale=1/S)`.
 
     if blur_box:
         dims = await _video_size(video_path)
@@ -356,12 +373,11 @@ async def render_translated_video(
         )
         vlabel = "wmv"
 
-    # Slow the finished render LAST (see the note above): one final setpts over
-    # already-burned frames preserves the clip's frame count = true slow motion.
-    # Re-synchronize to the source frame rate afterwards so the container is CFR —
-    # a VFR stream makes some players stall early. `fps` must sit AFTER everything
-    # (nothing later can re-sync and duplicate frames at EOF).
-    if slow_factor > 1.0001:
+    # Retime the finished render LAST (see the note above): one final setpts over
+    # already-burned frames preserves the frame count. Re-synchronize to the source
+    # frame rate afterwards so the container is CFR — a VFR stream makes some
+    # players stall early. `fps` must sit AFTER everything.
+    if abs(slow_factor - 1.0) > 0.0001:
         fps = await _video_fps(video_path)
         if fps > 0.0:
             parts.append(f"[{vlabel}]setpts=PTS*{slow_factor:.4f},fps={fps:.6g}[vslow]")
@@ -378,18 +394,24 @@ async def render_translated_video(
         vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
 
     has_original_audio = await _has_audio(video_path)
+    dub_in = "1:a"
+    if abs(dub_speed - 1.0) > 0.0001:
+        parts.append(f"[1:a]{_atempo_chain(dub_speed)}[dubt]")
+        dub_in = "dubt"
     if mute_original or not has_original_audio:
-        parts.append("[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
+        parts.append(f"[{dub_in}]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
     else:
-        orig = f"[0:a]volume={original_volume_db}dB[orig]"
-        if slow_factor > 1.0001:
-            # Stretch the kept original audio with the slowed video (atempo keeps pitch).
-            orig = f"[0:a]atempo={1.0 / slow_factor:.4f},volume={original_volume_db}dB[orig]"
+        orig_chain = f"[0:a]volume={original_volume_db}dB[orig]"
+        if abs(slow_factor - 1.0) > 0.0001:
+            # Stretch the kept original audio with the retimed video (preserves pitch).
+            orig_chain = (
+                f"[0:a]{_atempo_chain(1.0 / slow_factor)},volume={original_volume_db}dB[orig]"
+            )
+        parts.append(orig_chain)
         parts.append(
-            f"{orig};"
-            f"[orig][1:a]amix=inputs=2:normalize=0:duration=longest:dropout_transition=0[mixed];"
-            f"[mixed]loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
+            f"[orig][{dub_in}]amix=inputs=2:normalize=0:duration=longest:dropout_transition=0[mixed]"
         )
+        parts.append("[mixed]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
 
     cmd = [FFMPEG_BIN, "-y", "-i", str(video_path), "-i", str(dub_path)]
     cmd += ["-filter_complex", ";".join(parts)]

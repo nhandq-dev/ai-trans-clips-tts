@@ -32,9 +32,30 @@ _MUX_SEM = asyncio.Semaphore(MUX_CONCURRENCY)
 
 # Dubbing slowdown: the output video runs DUB_SLOW_FACTOR slower than the
 # source. Whisper transcribes the NATURAL audio; its timestamps are scaled by
-# this factor once, in aligning, and the final render slows the video by it.
+# this factor once, in aligning, and the final render retimes the video by it.
 DUB_SLOW_MODE = os.getenv("DUB_SLOW_MODE", "fixed").strip().lower()
 DUB_SLOW_FACTOR = float(os.getenv("DUB_SLOW_FACTOR", "1.5"))
+
+
+def _output_speed(job: jobs.Job) -> float:
+    """Per-job global playback speed of the final output (1.3 = 30% faster)."""
+    try:
+        speed = float((job.options or {}).get("output_speed", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        speed = 1.0
+    return min(2.0, max(0.5, speed))
+
+
+def _timing_factors(job: jobs.Job) -> tuple[float, float, float]:
+    """Return (base_slow, output_speed, final_slow) for retiming.
+
+    base_slow: dub-fit slowdown (natural narration fits). Segments/dub are laid
+    out on this timeline. output_speed: user-facing final playback speed.
+    final_slow = base_slow / output_speed: the setpts factor applied in mux.
+    """
+    base = DUB_SLOW_FACTOR
+    speed = _output_speed(job)
+    return base, speed, base / speed
 
 # stage progress map (plan/009 §4.2)
 STAGE_PROGRESS = {
@@ -472,11 +493,12 @@ async def run_pipeline(job_id: str):
                 await to_wav(tts_paths[i], dst)
                 out_lens.append(await probe_duration(dst))
             video_duration = await probe_duration(source_mp4)
-            # Whisper timestamps are on the NATURAL clock; the output video is
-            # slowed by DUB_SLOW_FACTOR inside the final render, so stretch the
-            # narration timeline by S to land on the output clock.
-            S = DUB_SLOW_FACTOR
-            out_duration = video_duration * S
+            # Whisper timestamps are on the NATURAL clock; stretch by the base
+            # dub-fit factor so natural narration fits. The final render applies the
+            # user's output speed on top (base/output_speed).
+            base_S, _out_speed, _final_S = _timing_factors(job)
+            S = base_S
+            out_duration = video_duration * base_S
 
             aligned_clips: list[tuple[Path, float]] = []
             slots: list[list[float]] = []
@@ -494,13 +516,18 @@ async def run_pipeline(job_id: str):
                 json.dumps({"factor": S, "out_duration": out_duration, "slots": slots}),
                 encoding="utf-8",
             )
-            # Re-write transcripts/SRT now that segments sit on the output timeline.
+            # Write transcripts/SRT on the final output timeline (after output speed).
+            if abs(_out_speed - 1.0) > 0.0001:
+                for seg in segs[:n]:
+                    seg.start = seg.start / _out_speed
+                    seg.end = seg.end / _out_speed
             write_outputs(result, work)
 
             await jobs.update_job(job_id, stage_state={**job.stage_state, "aligning": "done"})
             job = await jobs.get_job(job_id)  # type: ignore
         else:
-            S = DUB_SLOW_FACTOR
+            base_S, output_speed, _final_S = _timing_factors(job)
+            S = base_S
             aligned_clips = []
             slots: list[list[float]] = []
             if timeline_path.exists():
@@ -522,7 +549,13 @@ async def run_pipeline(job_id: str):
                 aligned_clips.append((p, float(pos)))
                 seg.start = float(pos)
                 seg.end = float(pos) + float(length)
-            if slots:
+            # Re-scale transcripts to the final output timeline when sped up.
+            if abs(output_speed - 1.0) > 0.0001:
+                for seg in result.segments:
+                    seg.start = seg.start / output_speed
+                    seg.end = seg.end / output_speed
+                write_outputs(result, work)
+            elif slots:
                 write_outputs(result, work)
 
         # ------------------------------------------------------------------
@@ -534,9 +567,10 @@ async def run_pipeline(job_id: str):
 
             async with _MUX_SEM:
                 video_duration = await probe_duration(source_mp4)
-                # The source is natural speed; the single render slows it by S.
-                slow_factor = DUB_SLOW_FACTOR
-                out_duration = video_duration * slow_factor
+                # Dub is laid out on the base slowdown timeline; the render applies
+                # the user's output speed on top (final_slow = base/output_speed).
+                base_S, output_speed, final_slow = _timing_factors(job)
+                out_duration = video_duration * base_S
                 dub_wav = work / "dub.wav"
                 if not dub_wav.exists():
                     await build_dub_track(aligned_clips, out_duration, dub_wav)
@@ -585,14 +619,24 @@ async def run_pipeline(job_id: str):
                         "w": info["width"],
                         "h": int(info["height"] * 0.2),
                     }
+                    # Write ASS on the base (dub) timeline, mapped to source-domain
+                    # frames for burn (1/base_S) — the render retimes by final_slow.
+                    ass_result = result
+                    if abs(output_speed - 1.0) > 0.0001:
+                        import copy
+
+                        ass_result = copy.deepcopy(result)
+                        for seg in ass_result.segments:
+                            seg.start = seg.start * output_speed
+                            seg.end = seg.end * output_speed
                     ass_path = write_ass(
-                        result,
+                        ass_result,
                         box_for_ass,
                         work / "newsubs.ass",
                         width=info["width"],
                         height=info["height"],
                         style=job.options.get("subtitle_style"),
-                        time_scale=(1.0 / slow_factor) if slow_factor > 1.0001 else 1.0,
+                        time_scale=(1.0 / base_S) if abs(base_S - 1.0) > 0.0001 else 1.0,
                     )
 
                 translated = work / "translated.mp4"
@@ -605,7 +649,8 @@ async def run_pipeline(job_id: str):
                     watermark=job.options.get("watermark"),
                     original_volume_db=job.options.get("original_audio_volume_db", -20),
                     mute_original=job.options.get("mute_original", False),
-                    slow_factor=slow_factor,
+                    slow_factor=final_slow,
+                    dub_speed=output_speed,
                     flip_horizontal=job.options.get("flip_horizontal", False),
                 )
 

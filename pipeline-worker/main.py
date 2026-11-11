@@ -249,6 +249,9 @@ class TranslateOptions(BaseModel):
     glossary: str | None = Field(default=None, max_length=30)
     min_speed: float = Field(default=0.8, ge=0.5, le=1.0)
     max_speed: float = Field(default=1.3, ge=1.0, le=2.0)
+    # Global playback speed of the final output (baked in). 1.3 = 30% faster.
+    # Distinct from min_speed/max_speed which only fit TTS per segment.
+    output_speed: float = Field(default=1.0, ge=0.5, le=2.0)
 
 
 class TranslateRequest(BaseModel):
