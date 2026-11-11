@@ -57,6 +57,7 @@ def _timing_factors(job: jobs.Job) -> tuple[float, float, float]:
     speed = _output_speed(job)
     return base, speed, base / speed
 
+
 # stage progress map (plan/009 §4.2)
 STAGE_PROGRESS = {
     "downloading": 15,
