@@ -36,8 +36,8 @@ SLOW_PAD_BUFFER_SECONDS = float(os.getenv("ALIGN_SLOW_PAD_BUFFER_SECONDS", "0.6"
 # Continuous dub timeline (default path). Clips are placed back-to-back; the
 # pause between two lines is the source pause clamped to this range, so a short
 # translation (or a long silence in the source) can never become dead air.
-ALIGN_MIN_GAP_SECONDS = float(os.getenv("ALIGN_MIN_GAP_SECONDS", "0.08"))
-ALIGN_MAX_GAP_SECONDS = float(os.getenv("ALIGN_MAX_GAP_SECONDS", "0.35"))
+ALIGN_MIN_GAP_SECONDS = float(os.getenv("ALIGN_MIN_GAP_SECONDS", "0.03"))
+ALIGN_MAX_GAP_SECONDS = float(os.getenv("ALIGN_MAX_GAP_SECONDS", "0.3"))
 ALIGN_LEAD_IN_SECONDS = float(os.getenv("ALIGN_LEAD_IN_SECONDS", "0.0"))
 ALIGN_TAIL_PAD_SECONDS = float(os.getenv("ALIGN_TAIL_PAD_SECONDS", "0.3"))
 # Bounds for the global video retime factor (dub duration / source duration).

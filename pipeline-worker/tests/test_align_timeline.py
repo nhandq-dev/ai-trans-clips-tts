@@ -15,7 +15,7 @@ def test_places_clips_without_dead_air():
         placements[i][0] - (placements[i - 1][0] + placements[i - 1][1])
         for i in range(1, len(placements))
     ]
-    assert all(0.08 <= gap <= 0.35 + 1e-6 for gap in gaps)
+    assert all(0.03 <= gap <= 0.3 + 1e-6 for gap in gaps)
 
 
 def test_preserves_natural_pause_when_within_bounds():
