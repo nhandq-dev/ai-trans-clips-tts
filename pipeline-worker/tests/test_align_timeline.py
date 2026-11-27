@@ -36,11 +36,11 @@ def test_factor_matches_narration_length():
     assert factor == pytest.approx(total / 20.0)
 
 
-def test_short_narration_does_not_speed_video_past_floor():
+def test_short_narration_does_not_speed_video():
     placements, factor = build_continuous_timeline([(0.0, 1.0)], [1.0], 100.0)
 
     assert placements == [(0.0, 1.0)]
-    assert factor == pytest.approx(0.8)
+    assert factor == pytest.approx(1.0)
 
 
 def test_merged_segment_internal_pause_never_becomes_dead_air():
@@ -48,7 +48,7 @@ def test_merged_segment_internal_pause_never_becomes_dead_air():
     placements, factor = build_continuous_timeline([(0.0, 20.0)], [3.0], 20.0)
 
     assert placements == [(0.0, 3.0)]
-    assert factor == pytest.approx(0.8)
+    assert factor == pytest.approx(1.0)
 
 
 def test_missing_clip_durations_are_ignored():

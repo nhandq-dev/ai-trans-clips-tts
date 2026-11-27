@@ -41,9 +41,11 @@ ALIGN_MAX_GAP_SECONDS = float(os.getenv("ALIGN_MAX_GAP_SECONDS", "0.3"))
 ALIGN_LEAD_IN_SECONDS = float(os.getenv("ALIGN_LEAD_IN_SECONDS", "0.0"))
 ALIGN_TAIL_PAD_SECONDS = float(os.getenv("ALIGN_TAIL_PAD_SECONDS", "0.3"))
 # Bounds for the global video retime factor (dub duration / source duration).
-# The factor is normally ~1.0-1.6; the bounds only guard against a bad ASR/TTS
-# measurement producing an absurd render.
-ALIGN_MIN_SLOW_FACTOR = float(os.getenv("ALIGN_MIN_SLOW_FACTOR", "0.8"))
+# The factor is normally ~1.0-1.6; the floor is 1.0 so the picture is never
+# played faster than the source when the narration happens to be shorter. The
+# ceiling only guards against a bad ASR/TTS measurement producing an absurd
+# render.
+ALIGN_MIN_SLOW_FACTOR = float(os.getenv("ALIGN_MIN_SLOW_FACTOR", "1.0"))
 ALIGN_MAX_SLOW_FACTOR = float(os.getenv("ALIGN_MAX_SLOW_FACTOR", "4.0"))
 
 WORK_SR = "48000"
