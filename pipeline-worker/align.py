@@ -1,18 +1,12 @@
-"""Fit TTS clips to their time slots (plan/009 T2.2).
+"""Dub timing helpers (plan/009 T2.2).
 
-Each segment has a slot ``end - start``. TTS output is usually longer (a slower
-target voice) or occasionally shorter than the slot, so the clip is
-time-stretched with ffmpeg's ``rubberband`` filter and then padded/trimmed until
-it is *exactly* the slot length. Because every clip is clamped to its own slot,
-the dub track can never overlap the following segment:
+The default path lays the TTS clips out as one continuous track: each clip is
+placed right after the previous one plus a short pause (clamped so a natural
+silence in the source can never leave a multi-second hole). ``to_wav`` trims the
+lead/trail silence TTS engines add, so the measured length is real speech.
 
-- 0.5 ≤ ratio ≤ 2.0 → ``rubberband=tempo=ratio`` (exact fit, pitch preserved)
-- ratio > 2.0       → ``rubberband=tempo=2.0``, excess is hard-trimmed (no overlap)
-- ratio < 0.5       → ``rubberband=tempo=0.5``, padded up to the (capped) slot
-
-Lead/trail silence the TTS engines add is stripped first so the measured ratio
-reflects real speech rather than padding (a couple hundred ms of silence would
-otherwise inflate every ratio and push otherwise-fine segments past the cap).
+``fit_to_slot`` is kept for callers that still want a clip stretched to a fixed
+slot (legacy jobs/tests); the pipeline no longer uses it for dub playback.
 
 Output is 48 kHz mono wav for later mux.
 """
@@ -39,48 +33,70 @@ ALIGN_MAX_TEMPO = float(os.getenv("ALIGN_MAX_TEMPO", "2.0"))
 # minute of silence: cap the padded length at the slowed clip plus a small buffer.
 SLOW_PAD_BUFFER_SECONDS = float(os.getenv("ALIGN_SLOW_PAD_BUFFER_SECONDS", "0.6"))
 
-# Dub-first timeline: slow the output video so the naturally-paced narration fits.
-# `fixed` always slows by DUB_SLOW_FACTOR; `auto` slows only as much as needed
-# (clamped to [DUB_SLOW_MIN, DUB_SLOW_FACTOR]); `off` keeps the old behavior.
-# `auto` (default) slows the video only as much as the measured narration needs
-# so natural-speed TTS never sounds faster than the picture; `fixed` always uses
-# DUB_SLOW_FACTOR; `off` keeps the source speed (narration squeezed to fit slots).
-DUB_SLOW_MODE = os.getenv("DUB_SLOW_MODE", "auto").strip().lower()
-DUB_SLOW_FACTOR = float(os.getenv("DUB_SLOW_FACTOR", "1.5"))
-DUB_SLOW_MIN = float(os.getenv("DUB_SLOW_MIN", "1.0"))
-# Cap on how much the narration is sped up when even the slowed video is too short.
-DUB_MAX_SPEEDUP = float(os.getenv("DUB_MAX_SPEEDUP", "1.5"))
+# Continuous dub timeline (default path). Clips are placed back-to-back; the
+# pause between two lines is the source pause clamped to this range, so a short
+# translation (or a long silence in the source) can never become dead air.
+ALIGN_MIN_GAP_SECONDS = float(os.getenv("ALIGN_MIN_GAP_SECONDS", "0.08"))
+ALIGN_MAX_GAP_SECONDS = float(os.getenv("ALIGN_MAX_GAP_SECONDS", "0.35"))
+ALIGN_LEAD_IN_SECONDS = float(os.getenv("ALIGN_LEAD_IN_SECONDS", "0.0"))
+ALIGN_TAIL_PAD_SECONDS = float(os.getenv("ALIGN_TAIL_PAD_SECONDS", "0.3"))
+# Bounds for the global video retime factor (dub duration / source duration).
+# The factor is normally ~1.0-1.6; the bounds only guard against a bad ASR/TTS
+# measurement producing an absurd render.
+ALIGN_MIN_SLOW_FACTOR = float(os.getenv("ALIGN_MIN_SLOW_FACTOR", "0.8"))
+ALIGN_MAX_SLOW_FACTOR = float(os.getenv("ALIGN_MAX_SLOW_FACTOR", "4.0"))
 
 WORK_SR = "48000"
 
 
-def slow_factor_for(measured_total: float, video_duration: float) -> float:
-    """Playback slowdown so natural-speed dubbing fits without forced stretching.
+def build_continuous_timeline(
+    source_spans: list[tuple[float, float]],
+    clip_durations: list[float],
+    source_duration: float,
+    *,
+    min_gap: float = ALIGN_MIN_GAP_SECONDS,
+    max_gap: float = ALIGN_MAX_GAP_SECONDS,
+    lead_in: float = ALIGN_LEAD_IN_SECONDS,
+    tail_pad: float = ALIGN_TAIL_PAD_SECONDS,
+    min_slow: float = ALIGN_MIN_SLOW_FACTOR,
+    max_slow: float = ALIGN_MAX_SLOW_FACTOR,
+) -> tuple[list[tuple[float, float]], float]:
+    """Place TTS clips on one continuous dub timeline.
 
-    ``fixed``: always ``DUB_SLOW_FACTOR`` (1.5). ``auto``: the smallest factor in
-    ``[DUB_SLOW_MIN, DUB_SLOW_FACTOR]`` that just fits the measured narration.
-    ``off``: 1.0 (old video speed, audio squeezed to fit slots).
+    ``source_spans[i]`` is the natural-clock ``(start, end)`` of segment ``i``;
+    ``clip_durations[i]`` is the measured speech length after silence trim.
+    Each clip starts after the previous one, separated by the source pause
+    clamped to ``[min_gap, max_gap]``. A pause inside a merged Whisper segment
+    is invisible here and therefore never turns into dead air.
+
+    Returns ``(placements, base_slow)`` where ``placements[i]`` is
+    ``(start, duration)`` on the base timeline and ``base_slow`` is the global
+    video retime factor (``dub_total / source_duration``), bounded so a bad
+    narration measurement cannot produce an absurd render.
     """
-    if DUB_SLOW_MODE == "off":
-        return 1.0
-    if DUB_SLOW_MODE == "fixed":
-        return DUB_SLOW_FACTOR
-    if measured_total <= video_duration or video_duration <= 0:
-        return DUB_SLOW_MIN
-    return min(DUB_SLOW_FACTOR, max(DUB_SLOW_MIN, measured_total / video_duration))
+    n = min(len(source_spans), len(clip_durations))
+    if n <= 0:
+        return [], 1.0
 
+    placements: list[tuple[float, float]] = []
+    cursor = max(0.0, float(lead_in))
+    prev_source_end = 0.0
+    for i in range(n):
+        clip = max(0.05, float(clip_durations[i] or 0.0))
+        source_start, source_end = source_spans[i]
+        if i > 0:
+            source_gap = max(0.0, float(source_start) - prev_source_end)
+            cursor += min(max(source_gap, min_gap), max_gap)
+        placements.append((round(cursor, 3), round(clip, 3)))
+        cursor += clip
+        prev_source_end = max(prev_source_end, float(source_end))
 
-def narration_speedup(total_natural: float, out_duration: float) -> float:
-    """Multiplier applied to the natural clip lengths so the whole narration fits.
-
-    Returns 1.0 when it already fits; otherwise a value in
-    ``[1/DUB_MAX_SPEEDUP, 1)`` that speeds the narration up just enough.
-    """
-    if total_natural <= 0 or out_duration <= 0:
-        return 1.0
-    if total_natural <= out_duration:
-        return 1.0
-    return max(1.0 / DUB_MAX_SPEEDUP, out_duration / total_natural)
+    total = cursor + max(0.0, float(tail_pad))
+    if source_duration <= 0:
+        return placements, 1.0
+    base_slow = total / source_duration
+    base_slow = min(max(base_slow, min_slow), max_slow)
+    return placements, round(base_slow, 6)
 
 
 async def probe_duration(path: str | Path) -> float:
@@ -110,10 +126,22 @@ async def _run_ffmpeg(cmd: list[str], where: str) -> None:
 
 
 async def to_wav(src: str | Path, dst: str | Path) -> None:
-    """Decode the TTS clip to a 48k mono wav verbatim — no silence trim, no tempo
-    change. The video is already slowed, so the narration is placed as spoken."""
+    """Decode ``src`` to a 48k mono wav, trimming lead/trail silence.
+
+    TTS engines pad every clip (often 0.3-1s). Keeping that padding would put a
+    small silence around every line, which the continuous timeline no longer
+    hides. Trimming first makes the measured duration the real speech length.
+    Falls back to a verbatim decode when trimming fails or leaves an empty file.
+    """
     src, dst = Path(src), Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
+    if TRIM_SILENCE:
+        try:
+            await _trim_leading_trailing_silence(src, dst)
+            if await probe_duration(dst) > 0.01:
+                return
+        except (TransientError, OSError, ValueError, KeyError):
+            pass
     tmp = Path(str(dst) + ".tmp.wav")
     await _run_ffmpeg(
         [

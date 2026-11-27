@@ -30,10 +30,8 @@ CACHE_DIR = Path(os.getenv("CACHE_DIR") or (Path(__file__).parent / "cache"))
 MUX_CONCURRENCY = max(1, int(os.getenv("MUX_CONCURRENCY", "2")))
 _MUX_SEM = asyncio.Semaphore(MUX_CONCURRENCY)
 
-# Dubbing slowdown: the output video runs DUB_SLOW_FACTOR slower than the
-# source. Whisper transcribes the NATURAL audio; its timestamps are scaled by
-# this factor once, in aligning, and the final render retimes the video by it.
-DUB_SLOW_MODE = os.getenv("DUB_SLOW_MODE", "fixed").strip().lower()
+# Fallback retime factor for jobs whose timeline.json predates the continuous
+# layout. New jobs size the factor from the measured narration instead.
 DUB_SLOW_FACTOR = float(os.getenv("DUB_SLOW_FACTOR", "1.5"))
 
 
@@ -46,16 +44,25 @@ def _output_speed(job: jobs.Job) -> float:
     return min(2.0, max(0.5, speed))
 
 
-def _timing_factors(job: jobs.Job) -> tuple[float, float, float]:
-    """Return (base_slow, output_speed, final_slow) for retiming.
+def _timeline_settings(
+    job: jobs.Job, timeline_path: Path, video_duration: float
+) -> tuple[float, float, float]:
+    """Return ``(base_slow, output_speed, out_duration)`` for this job.
 
-    base_slow: dub-fit slowdown (natural narration fits). Segments/dub are laid
-    out on this timeline. output_speed: user-facing final playback speed.
-    final_slow = base_slow / output_speed: the setpts factor applied in mux.
+    ``base_slow`` is written by the aligning stage into ``timeline.json`` (it is
+    sized to the measured narration). ``DUB_SLOW_FACTOR`` is only a fallback for
+    old jobs that have no timeline file.
     """
     base = DUB_SLOW_FACTOR
-    speed = _output_speed(job)
-    return base, speed, base / speed
+    out_duration = video_duration * base
+    if timeline_path.exists():
+        try:
+            timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+            base = float(timeline.get("factor") or base)
+            out_duration = float(timeline.get("out_duration") or video_duration * base)
+        except Exception:
+            pass
+    return base, _output_speed(job), out_duration
 
 
 # stage progress map (plan/009 §4.2)
@@ -323,9 +330,9 @@ async def run_pipeline(job_id: str):
 
         # ------------------------------------------------------------------
         # Stage: extracting — audio from the ORIGINAL source (natural speed).
-        # The video slowdown happens ONCE, inside the final mux render
+        # The video retime happens ONCE, inside the final mux render
         # (render_translated_video slow_factor), so Whisper hears natural audio
-        # and its timestamps are scaled by DUB_SLOW_FACTOR in the aligning stage.
+        # and the aligning stage can lay the narration out on its own clock.
         # ------------------------------------------------------------------
         if "extracting" not in job.stage_state:
             await _update(job_id, "extracting")
@@ -471,64 +478,71 @@ async def run_pipeline(job_id: str):
             raise RuntimeError("no TTS clips generated")
 
         # ------------------------------------------------------------------
-        # Stage: aligning — measure the narration and pick the output slowdown
+        # Stage: aligning — lay the narration out as one continuous track
         # ------------------------------------------------------------------
-        # The TTS clips are measured at natural pace; the video is slowed by
-        # the smallest factor that lets the whole narration fit (auto S). Each
-        # clip is placed at S x (Gemini start), never tempo-changed; the
-        # monotonic cursor only pushes a clip when it would overlap.
+        # TTS clips are measured at natural pace after lead/trail silence is
+        # trimmed. They are then placed back-to-back (small capped pauses), and
+        # the video is retimed by (dub total / source duration). A short TTS
+        # line can therefore never leave a multi-second hole before the next
+        # line; the final render applies the user's output speed on top.
         aligned_dir = work / "aligned"
         timeline_path = work / "timeline.json"
+        from align import probe_duration
+
         if "aligning" not in job.stage_state:
             await _update(job_id, "aligning")
-            from align import probe_duration, to_wav
+            from align import build_continuous_timeline, to_wav
 
             aligned_dir.mkdir(parents=True, exist_ok=True)
 
             segs = result.segments
             n = min(len(segs), len(tts_paths))
-            # Convert every clip to wav verbatim — no trim, no tempo change.
+            # Convert every clip to wav with lead/trail silence trimmed.
             out_lens: list[float] = []
             for i in range(n):
                 dst = aligned_dir / f"seg_{i:04d}.wav"
                 await to_wav(tts_paths[i], dst)
                 out_lens.append(await probe_duration(dst))
             video_duration = await probe_duration(source_mp4)
-            # Whisper timestamps are on the NATURAL clock; stretch by the base
-            # dub-fit factor so natural narration fits. The final render applies the
-            # user's output speed on top (base/output_speed).
-            base_S, _out_speed, _final_S = _timing_factors(job)
-            S = base_S
+            # Whisper timestamps are on the NATURAL clock; keep them only to
+            # derive the pause between lines.
+            source_spans = [(float(segs[i].start), float(segs[i].end)) for i in range(n)]
+            placements, base_S = build_continuous_timeline(source_spans, out_lens, video_duration)
+            output_speed = _output_speed(job)
             out_duration = video_duration * base_S
 
             aligned_clips: list[tuple[Path, float]] = []
             slots: list[list[float]] = []
-            cursor = 0.0
-            for i in range(n):
+            for i, (pos, out_len) in enumerate(placements):
                 seg = segs[i]
-                out_len = out_lens[i]
-                pos = max(float(seg.start) * S, cursor)
                 aligned_clips.append((aligned_dir / f"seg_{i:04d}.wav", pos))
-                cursor = pos + out_len
                 seg.start = pos
                 seg.end = pos + out_len
                 slots.append([round(pos, 3), round(out_len, 3)])
             (work / "timeline.json").write_text(
-                json.dumps({"factor": S, "out_duration": out_duration, "slots": slots}),
+                json.dumps(
+                    {
+                        "mode": "continuous",
+                        "factor": base_S,
+                        "out_duration": round(out_duration, 3),
+                        "slots": slots,
+                    }
+                ),
                 encoding="utf-8",
             )
             # Write transcripts/SRT on the final output timeline (after output speed).
-            if abs(_out_speed - 1.0) > 0.0001:
+            if abs(output_speed - 1.0) > 0.0001:
                 for seg in segs[:n]:
-                    seg.start = seg.start / _out_speed
-                    seg.end = seg.end / _out_speed
+                    seg.start = seg.start / output_speed
+                    seg.end = seg.end / output_speed
             write_outputs(result, work)
 
             await jobs.update_job(job_id, stage_state={**job.stage_state, "aligning": "done"})
             job = await jobs.get_job(job_id)  # type: ignore
         else:
-            base_S, output_speed, _final_S = _timing_factors(job)
-            S = base_S
+            base_S, output_speed, _out_duration = _timeline_settings(
+                job, timeline_path, await probe_duration(source_mp4)
+            )
             aligned_clips = []
             slots: list[list[float]] = []
             if timeline_path.exists():
@@ -546,7 +560,7 @@ async def run_pipeline(job_id: str):
                 if idx < len(slots):
                     pos, length = slots[idx]
                 else:
-                    pos, length = float(seg.start) * S, seg.end - seg.start
+                    pos, length = float(seg.start) * base_S, seg.end - seg.start
                 aligned_clips.append((p, float(pos)))
                 seg.start = float(pos)
                 seg.end = float(pos) + float(length)
@@ -570,8 +584,10 @@ async def run_pipeline(job_id: str):
                 video_duration = await probe_duration(source_mp4)
                 # Dub is laid out on the base slowdown timeline; the render applies
                 # the user's output speed on top (final_slow = base/output_speed).
-                base_S, output_speed, final_slow = _timing_factors(job)
-                out_duration = video_duration * base_S
+                base_S, output_speed, out_duration = _timeline_settings(
+                    job, timeline_path, video_duration
+                )
+                final_slow = base_S / output_speed
                 dub_wav = work / "dub.wav"
                 if not dub_wav.exists():
                     await build_dub_track(aligned_clips, out_duration, dub_wav)
